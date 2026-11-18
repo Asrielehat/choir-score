@@ -70,6 +70,12 @@ export interface StreamInfo {
   reasonEn: string;
 }
 
+export interface ScorePageImage {
+  label: string;
+  /** Small JPEG data URL of the scanned page, for comparison next to the roll. */
+  href: string;
+}
+
 export interface ScoreProject {
   title: string;
   sourceName?: string;
@@ -81,6 +87,7 @@ export interface ScoreProject {
   keys: KeyPoint[];
   measures: MeasureSpan[];
   warnings: string[];
+  pages?: ScorePageImage[];
 }
 
 export interface RoleMeta {

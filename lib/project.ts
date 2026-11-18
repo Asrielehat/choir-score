@@ -1,6 +1,6 @@
 import { exportMidi, parseMidi } from "./midi";
 import { exportMusicXml } from "./musicxml/export";
-import { parseMusicXml } from "./musicxml/parse";
+import { parseMusicXml, type ParseOptions } from "./musicxml/parse";
 import { extractMxl } from "./mxl";
 import { separateScore } from "./separate";
 import {
@@ -13,8 +13,9 @@ import {
   isRole,
 } from "./types";
 
-export function projectFromMusicXml(xml: string): ScoreProject {
-  return separateScore(parseMusicXml(xml));
+export function projectFromMusicXml(xml: string, options?: { fromOmr?: boolean }): ScoreProject {
+  const parseOptions: ParseOptions = { lockToMeter: !!options?.fromOmr };
+  return separateScore(parseMusicXml(xml, parseOptions), { choirLayout: !!options?.fromOmr });
 }
 
 export function projectFromMidi(data: Uint8Array): ScoreProject {
@@ -92,6 +93,9 @@ export function normalizeProject(input: ScoreProject): ScoreProject {
     keys: input.keys?.length ? input.keys : [{ beat: 0, fifths: 0, mode: "major" }],
     measures: Array.isArray(input.measures) ? input.measures : [],
     warnings: Array.isArray(input.warnings) ? input.warnings : [],
+    pages: Array.isArray(input.pages)
+      ? input.pages.filter((page) => page && typeof page.href === "string" && page.href.startsWith("data:image/")).slice(0, 3)
+      : undefined,
   };
 }
 

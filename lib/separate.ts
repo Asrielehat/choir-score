@@ -114,7 +114,118 @@ function staffCount(part: RawPart): number {
   return Math.max(part.staves, ...part.notes.map((n) => n.staff), 1);
 }
 
-function planStaves(parts: RawPart[]): StaffPlan[] {
+export interface SeparateOptions {
+  /** Choir scan: top-to-bottom voices, piano grand staff kept at the bottom. */
+  choirLayout?: boolean;
+}
+
+interface StaffFeat {
+  staff: number;
+  lyrics: number;
+  clef?: string;
+  median: number;
+  split: boolean;
+}
+
+function staffFeatures(part: RawPart): StaffFeat[] {
+  const count = staffCount(part);
+  const features: StaffFeat[] = [];
+  for (let staff = 1; staff <= count; staff++) {
+    const notes = part.notes.filter((note) => note.staff === staff);
+    features.push({
+      staff,
+      lyrics: notes.filter((note) => note.lyric).length,
+      clef: part.clefs.find((clef) => clef.staff === staff)?.sign,
+      median: median(notes),
+      split: splitEvidence(notes),
+    });
+  }
+  return features;
+}
+
+function bottomIsPiano(features: StaffFeat[]): boolean {
+  if (features.length < 3) return false;
+  const right = features[features.length - 2];
+  const left = features[features.length - 1];
+  const vocal = features.slice(0, -2);
+  const vocalLyrics = vocal.reduce((sum, feature) => sum + feature.lyrics, 0);
+  const pianoLyrics = right.lyrics + left.lyrics;
+  const leftIsBass = left.clef === "F" || (!left.clef && left.median + 3 < right.median) || left.median < 57;
+  const quieterLyrics = pianoLyrics <= Math.max(1, vocalLyrics * 0.35);
+  return leftIsBass && quieterLyrics && right.median + 1 >= left.median;
+}
+
+function systemPlans(part: RawPart): StaffPlan[] | null {
+  const features = staffFeatures(part);
+  if (features.length < 3) return null;
+  const piano = bottomIsPiano(features);
+  const vocal = piano ? features.slice(0, -2) : features;
+  const partName = part.name || part.abbr || part.id;
+  const plans: StaffPlan[] = [];
+  const single = (staff: number, role: Role, zh: string, en: string): StaffPlan => ({
+    partId: part.id,
+    partName,
+    staff,
+    mode: role.startsWith("piano") ? "piano" : "single",
+    upper: role,
+    reasonZh: zh,
+    reasonEn: en,
+  });
+  const shared = (staff: number, upper: Role, lower: Role, zh: string, en: string): StaffPlan => ({
+    partId: part.id,
+    partName,
+    staff,
+    mode: "shared",
+    upper,
+    lower,
+    reasonZh: zh,
+    reasonEn: en,
+  });
+
+  if (vocal.length === 2 && (vocal[0].split || vocal[1].split)) {
+    plans.push(shared(vocal[0].staff, "soprano", "alto", "缩谱高音谱表，符干分开女高和女低", "Closed treble staff, stems split SA"));
+    plans.push(shared(vocal[1].staff, "tenor", "bass", "缩谱低音谱表，符干分开男高和男低", "Closed bass staff, stems split TB"));
+  } else if (vocal.length === 2) {
+    plans.push(single(vocal[0].staff, "soprano", "上方声部谱表", "Upper vocal staff"));
+    plans.push(single(vocal[1].staff, "alto", "下一行声部谱表", "Next vocal staff"));
+  } else {
+    const roles: Role[] = ["soprano", "alto", "tenor", "bass"];
+    vocal.slice(0, 4).forEach((feature, index) => {
+      const role = roles[index] ?? "bass";
+      plans.push(single(feature.staff, role, `开大谱第 ${index + 1} 行`, `Open score staff ${index + 1}`));
+    });
+  }
+  if (piano) {
+    const right = features[features.length - 2];
+    const left = features[features.length - 1];
+    plans.push(single(right.staff, "piano-rh", "系统最下面的高音谱表，当作钢琴右手", "Bottom treble staff, piano right hand"));
+    plans.push(single(left.staff, "piano-lh", "系统最下面的低音谱表，当作钢琴左手", "Bottom bass staff, piano left hand"));
+  }
+  return plans;
+}
+
+function applyChoirPartOrder(parts: RawPart[], labels: NameKind[], counts: number[]) {
+  const singles = parts
+    .map((_, index) => index)
+    .filter((index) => {
+      const label = labels[index];
+      return counts[index] === 1 && !isSpecificVoice(label) && label !== "piano" && label !== "choir";
+    });
+  const roles: NameKind[] =
+    singles.length >= 6
+      ? ["soprano", "alto", "tenor", "bass", "piano-rh", "piano-lh"]
+      : singles.length === 5
+        ? ["soprano", "alto", "tenor", "bass", "piano-rh"]
+        : singles.length === 4
+          ? ["soprano", "alto", "tenor", "bass"]
+          : [];
+  if (!roles.length) return;
+  singles.slice(0, roles.length).forEach((index, order) => {
+    labels[index] = roles[order];
+  });
+}
+
+function planStaves(parts: RawPart[], options: SeparateOptions = {}): StaffPlan[] {
   const counts = parts.map(staffCount);
   const labels = parts.map((part) => roleFromName(part.name) ?? roleFromName(part.abbr));
   const lyrics = parts.map(hasLyrics);
@@ -133,11 +244,13 @@ function planStaves(parts: RawPart[]): StaffPlan[] {
     else if (counts[i] >= 4) labels[i] = "choir";
   });
 
+  if (options.choirLayout) applyChoirPartOrder(parts, labels, counts);
+
   const unknownSingles = labels
     .map((label, i) => ({ label, i }))
     .filter((item) => item.label == null && counts[item.i] === 1);
   const namedVoices = labels.filter((label) => isSpecificVoice(label)).length;
-  if (namedVoices === 0 && unknownSingles.length === 4) {
+  if (!options.choirLayout && namedVoices === 0 && unknownSingles.length === 4) {
     const ranked = unknownSingles
       .slice()
       .sort((a, b) => median(parts[b.i].notes) - median(parts[a.i].notes));
@@ -178,6 +291,25 @@ function planStaves(parts: RawPart[]): StaffPlan[] {
     const label = labels[i];
     const staves = counts[i];
     const partName = part.name || part.abbr || part.id;
+    if (options.choirLayout && staves >= 3) {
+      const system = systemPlans(part);
+      if (system?.length) {
+        plans.push(...system);
+        return;
+      }
+    }
+    if (label === "piano-rh" || label === "piano-lh") {
+      plans.push({
+        partId: part.id,
+        partName,
+        staff: 1,
+        mode: "piano",
+        upper: label,
+        reasonZh: label === "piano-lh" ? "系统底部，钢琴左手" : "系统底部，钢琴右手",
+        reasonEn: label === "piano-lh" ? "Bottom of the system, piano left hand" : "Bottom of the system, piano right hand",
+      });
+      return;
+    }
     const shared = forceShared.get(i);
     if (shared) {
       plans.push({
@@ -530,8 +662,22 @@ function realizePlain(
   };
 }
 
-export function separateScore(score: RawScore): ScoreProject {
-  const plans = planStaves(score.parts);
+export function separateScore(score: RawScore, options: SeparateOptions = {}): ScoreProject {
+  const plans = planStaves(score.parts, options);
+  const warnings = score.warnings.slice();
+  if (options.choirLayout) {
+    for (const part of score.parts) {
+      const missing = [];
+      for (let staff = 1; staff <= staffCount(part); staff++) {
+        if (!part.clefs.some((clef) => clef.staff === staff) && part.notes.some((note) => note.staff === staff)) {
+          missing.push(staff);
+        }
+      }
+      if (missing.length) {
+        warnings.push(`${part.name || part.id} 谱表 ${missing.join("、")} 没有谱号，音高可能差八度，可在卷帘里改。`);
+      }
+    }
+  }
   let serial = 0;
   const idGen = () => `n${++serial}`;
   const notes: NoteEvent[] = [];
@@ -562,7 +708,7 @@ export function separateScore(score: RawScore): ScoreProject {
     meters: score.meters.length ? score.meters : [{ beat: 0, beats: 4, beatType: 4 }],
     keys: score.keys.length ? score.keys : [{ beat: 0, fifths: 0, mode: "major" }],
     measures: score.measures,
-    warnings: score.warnings,
+    warnings,
   };
 }
 

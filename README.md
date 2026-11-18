@@ -49,16 +49,28 @@ npm run lint
 
 ## 光学乐谱识别 OMR
 
-这一版**不带**识别引擎。PDF / 图片会交给 `POST /api/omr`。没配置时返回 `501`，并说明怎么接。
+上传 PDF、PNG 或 JPG，或点「识别缩谱 / 识别开大谱」。`POST /api/omr` 用 [Audiveris 5.11](https://github.com/Audiveris/audiveris) 把这一页转成 MusicXML，再按合唱总谱拆轨。PDF 用页眉旁的页码，只认那一页。
 
-合唱谱建议用 [Audiveris](https://github.com/Audiveris/audiveris)（能保留多行谱表，扫描件最好 300 DPI 以上）。`oemer`、`homr` 更轻，但经常把 SATB 压成一个声部，不适合缩谱。名为 `satb-line-omr` 的工具如果之后有可执行文件，用同一套环境变量接上即可，不用改界面。
+选 Audiveris 是因为它按系统保留多行谱表。`oemer` 和 `homr` 更轻，但会把 SATB 多行谱收成一个声部。没有找到可直接安装的 `satb-line-omr`。要换引擎时设置 `OMR_COMMAND`（不要设成单词 `audiveris`，那会走内置安装）和逗号分隔的 `OMR_ARGS`，占位符是 `{input}` 和 `{outdir}`。
+
+安装（Ubuntu 24.04，需要 Java 21）：
 
 ```bash
-OMR_COMMAND=audiveris
-OMR_ARGS=-batch,-export,-output,{outdir},{input}
+sudo apt-get install -y tesseract-ocr poppler-utils ffmpeg
+curl -L -o /tmp/audiveris.deb \
+  https://github.com/Audiveris/audiveris/releases/download/5.11.0/Audiveris-5.11.0-ubuntu24.04-x86_64.deb
+sudo dpkg -i /tmp/audiveris.deb
+sudo mkdir -p /opt/audiveris/tessdata
+curl -L -o /opt/audiveris/tessdata/eng.traineddata \
+  https://github.com/tesseract-ocr/tessdata/raw/main/eng.traineddata
 ```
 
-`OMR_ARGS` 用逗号分开，不要经过 shell。`{input}` 是上传的文件，`{outdir}` 是空目录。命令退出码为 0 后，接口会在目录里找 `.musicxml` / `.xml` / `.mxl`，再走和手动导入一样的分轨。
+Audiveris 的文字识别走 Tesseract 的 legacy 引擎。发行版自带的 `eng` 数据往往只有 LSTM，歌词会是空的，所以上面要另下一份 `tessdata`。接口在 `/opt/audiveris/bin/Audiveris` 存在时就会用它。扫描页先栅格化成 300 DPI PNG。识别结果旁边可以对照缩小后的原页。小节时值对不齐时裁到小节线，不把后面的音乐往后推。
+
+两份测试谱在 `public/samples/omr/`：
+
+- `abide-with-me.png`：《Abide with Me》四部缩谱（女高女低一行、男高男低一行）。曲调与歌词是公有领域，排版来自 Timeless Truths，这里按 300 DPI 栅格化。这一版没有另外的钢琴伴奏，钢琴弹的就是声部本身。
+- `gounod-daughters.png`：古诺《Daughters of Jerusalem》（1915 年 Novello 版，公有领域）第 12 页扫描，开大谱四行声部加钢琴。原书在 Internet Archive，条目 `daughtersofjerus00goun`。
 
 ## 限制
 
@@ -68,7 +80,10 @@ OMR_ARGS=-batch,-export,-output,{outdir},{input}
 - 极短的倚音、提示音（cue）会跳过。连音线会收成一个长音。
 - MIDI 最好是「一个声部一条轨」，并用轨名标明 Soprano / Alto / Tenor / Bass / Piano。单轨里塞进全部 SATB 时，只能当成一条旋律或钢琴，不会自动猜出四个声部。
 - `score-timewise` 能读，但主流导出仍是 `score-partwise`。
-- OMR 本身没有实现。
+- 歌词识别依赖 Audiveris 能加载 legacy 版 `eng.traineddata`。没有这份数据时，声部仍然按谱表位置拆，但歌词经常是空的。
+- 低音谱号如果没被认出来，男低音和钢琴左手会整轨偏高，需要在卷帘里改，或在「声部分配」里看音域。
+- 一次只认 PDF 的一页。封面、目录页认出来会是空的或很碎。
+- Google 图书那种对比度差、谱表很密的扫描（例如韩德尔《Blessed are they》的某些页）可能几乎认不出音符。干净的铜版或矢量谱可靠得多。
 
 ## 示例
 

@@ -56,6 +56,10 @@ export function Editor() {
   const [helpOpen, setHelpOpen] = useState(false);
   const [omrOpen, setOmrOpen] = useState(false);
   const [omrStatus, setOmrStatus] = useState<OmrStatus | null>(null);
+  const [pdfPage, setPdfPage] = useState(1);
+  const [busyLabel, setBusyLabel] = useState("");
+  const [elapsed, setElapsed] = useState(0);
+  const [showPage, setShowPage] = useState(true);
 
   useEffect(() => {
     const storedLocale = localStorage.getItem("choir-roll.locale");
@@ -149,6 +153,8 @@ export function Editor() {
       window.removeEventListener("drop", drop);
       window.removeEventListener("dragleave", leave);
     };
+    // openFile is recreated each render and only needs the initial listener.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   async function loadSample() {
@@ -166,23 +172,58 @@ export function Editor() {
     }
   }
 
+  async function recognize(file: File, page = pdfPage) {
+    useEditor.getState().setBusy(true);
+    useEditor.getState().setError(null);
+    setBusyLabel(tr(useEditor.getState().locale, "Audiveris 正在读这页谱，通常要一分钟左右", "Audiveris is reading this page, usually about a minute"));
+    setElapsed(0);
+    const started = Date.now();
+    const timer = window.setInterval(() => setElapsed(Math.round((Date.now() - started) / 1000)), 500);
+    try {
+      const body = new FormData();
+      body.set("file", file);
+      body.set("page", String(page));
+      const response = await fetch("/api/omr", { method: "POST", body });
+      const data = (await response.json()) as OmrStatus & {
+        ok?: boolean;
+        musicxml?: string;
+        warnings?: string[];
+        pages?: { label: string; href: string }[];
+      };
+      if (data.ok && data.musicxml) {
+        const next = projectFromMusicXml(data.musicxml, { fromOmr: true });
+        next.sourceName = file.name;
+        next.pages = data.pages ?? [];
+        next.warnings = [...(data.warnings ?? []), ...next.warnings];
+        useEditor.getState().setProject(next);
+        setShowPage(true);
+      } else {
+        setOmrStatus(data);
+        setOmrOpen(true);
+      }
+    } catch (caught) {
+      useEditor.getState().setError(caught instanceof Error ? caught.message : String(caught));
+    } finally {
+      window.clearInterval(timer);
+      useEditor.getState().setBusy(false);
+      setBusyLabel("");
+    }
+  }
+
+  async function recognizeSample(url: string, name: string) {
+    const response = await fetch(url);
+    if (!response.ok) throw new Error(name);
+    const blob = await response.blob();
+    await recognize(new File([blob], name, { type: blob.type || "image/png" }), 1);
+  }
+
   async function openFile(file: File) {
     useEditor.getState().setBusy(true);
     useEditor.getState().setError(null);
     try {
       if (/\.(pdf|png|jpe?g|tif|tiff)$/i.test(file.name)) {
-        const body = new FormData();
-        body.set("file", file);
-        const response = await fetch("/api/omr", { method: "POST", body });
-        const data = (await response.json()) as OmrStatus & { ok?: boolean; musicxml?: string };
-        if (data.ok && data.musicxml) {
-          const next = projectFromMusicXml(data.musicxml);
-          next.sourceName = file.name;
-          useEditor.getState().setProject(next);
-        } else {
-          setOmrStatus(data);
-          setOmrOpen(true);
-        }
+        useEditor.getState().setBusy(false);
+        await recognize(file);
         return;
       }
       const bytes = new Uint8Array(await file.arrayBuffer());
@@ -247,7 +288,38 @@ export function Editor() {
             <Button variant="muted" size="sm" onClick={() => void loadSample()} disabled={busy}>
               {tr(locale, "示例「晨光」", "Sample")}
             </Button>
-            <Button variant="outline" size="sm" onClick={() => fileRef.current?.click()}>
+            <Button
+              variant="default"
+              size="sm"
+              disabled={busy}
+              onClick={() => void recognizeSample("/samples/omr/abide-with-me.png", "abide-with-me.png").catch((error: unknown) => useEditor.getState().setError(String(error)))}
+            >
+              {tr(locale, "识别缩谱", "Scan closed")}
+            </Button>
+            <Button
+              variant="default"
+              size="sm"
+              disabled={busy}
+              onClick={() =>
+                void recognizeSample("/samples/omr/gounod-daughters.png", "gounod-daughters.png").catch((error: unknown) =>
+                  useEditor.getState().setError(String(error)),
+                )
+              }
+            >
+              {tr(locale, "识别开大谱", "Scan open")}
+            </Button>
+            <label className="flex items-center gap-1 text-[11px] text-[#9c968a]">
+              PDF
+              <Input
+                aria-label={tr(locale, "PDF 页码", "PDF page")}
+                type="number"
+                min={1}
+                value={pdfPage}
+                onChange={(event) => setPdfPage(Math.max(1, Number(event.target.value) || 1))}
+                className="h-8 w-14"
+              />
+            </label>
+            <Button variant="outline" size="sm" onClick={() => fileRef.current?.click()} disabled={busy}>
               <FolderOpen className="h-3.5 w-3.5" />
               {tr(locale, "导入", "Import")}
             </Button>
@@ -301,8 +373,11 @@ export function Editor() {
           </div>
         ) : null}
         {project?.warnings.length ? (
-          <div className="border-b border-[#3a3424] bg-[#2a2418] px-3 py-1.5 text-xs text-[#f0d7a8]">
-            {project.warnings.slice(0, 2).join(" ")}
+          <div className="max-h-24 overflow-auto border-b border-[#3a3424] bg-[#2a2418] px-3 py-1.5 text-xs leading-5 text-[#f0d7a8]">
+            {project.warnings.slice(0, 8).map((warning, index) => (
+              <div key={`${index}-${warning}`}>{warning}</div>
+            ))}
+            {project.warnings.length > 8 ? <div>… {project.warnings.length - 8}</div> : null}
           </div>
         ) : null}
 
@@ -310,8 +385,45 @@ export function Editor() {
           <aside className="max-h-[34vh] shrink-0 border-b border-[#2a2f3c] md:max-h-none md:w-[280px] md:overflow-y-auto md:border-r md:border-b-0">
             <TrackList />
           </aside>
-          <main className="relative min-h-0 min-w-0 flex-1">
-            {project ? <PianoRoll /> : <Empty locale={locale} busy={busy} />}
+          <main className="relative flex min-h-0 min-w-0 flex-1">
+            <div className="relative min-w-0 flex-1">
+              {project ? <PianoRoll /> : <Empty locale={locale} busy={busy} />}
+            </div>
+            {project?.pages?.length && showPage ? (
+              <aside className="hidden w-[300px] shrink-0 overflow-auto border-l border-[#2a2f3c] bg-[#141821] p-2 lg:block">
+                <div className="mb-2 flex items-center justify-between text-xs text-[#c7c1b6]">
+                  <span>{tr(locale, "原谱对照", "Original page")}</span>
+                  <button type="button" className="underline" onClick={() => setShowPage(false)}>
+                    {tr(locale, "收起", "Hide")}
+                  </button>
+                </div>
+                {project.pages.map((page) => (
+                  <figure key={page.label}>
+                    <figcaption className="mb-1 text-[11px] text-[#9c968a]">{page.label}</figcaption>
+                    {/* The scan is the thing the user compares against the roll. */}
+                    {/* Data URLs from the recognition API; next/image does not optimize those. */}
+                    {/* eslint-disable-next-line @next/next/no-img-element */}
+                    <img src={page.href} alt={page.label} className="w-full bg-white" />
+                  </figure>
+                ))}
+              </aside>
+            ) : project?.pages?.length ? (
+              <button
+                type="button"
+                className="absolute top-2 right-3 z-10 rounded-md bg-[#1c212c] px-2 py-1 text-xs text-[#f0d7a8]"
+                onClick={() => setShowPage(true)}
+              >
+                {tr(locale, "原谱", "Page")}
+              </button>
+            ) : null}
+            {busy ? (
+              <div className="absolute inset-0 z-20 grid place-items-center bg-[#10131a]/80 px-6 text-center">
+                <div>
+                  <p className="text-lg">{busyLabel || tr(locale, "请稍等", "Working")}</p>
+                  <p className="mt-2 text-sm tabular-nums text-[#d7a15e]">{elapsed}s</p>
+                </div>
+              </div>
+            ) : null}
             {dragging ? (
               <div className="pointer-events-none absolute inset-3 grid place-items-center rounded-xl border-2 border-dashed border-[#d7a15e] bg-[#10131a]/80 text-sm">
                 {tr(locale, "松开即可导入 MusicXML、MXL、MIDI 或工程", "Drop MusicXML, MXL, MIDI, or a project")}

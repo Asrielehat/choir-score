@@ -118,7 +118,16 @@ function descendants(el: XmlElement, name: string): XmlElement[] {
   return out;
 }
 
-export function parseMusicXml(xml: string): RawScore {
+export interface ParseOptions {
+  /**
+   * Keep the bar grid fixed to the time signature. If a measure runs long
+   * (a common OMR error), trim it back to the barline instead of pushing
+   * every later bar to the right.
+   */
+  lockToMeter?: boolean;
+}
+
+export function parseMusicXml(xml: string, options: ParseOptions = {}): RawScore {
   const clean = xml.replace(/^\uFEFF/, "").trim();
   if (!clean) throw new Error("文件是空的。");
   let root: XmlElement;
@@ -136,11 +145,11 @@ export function parseMusicXml(xml: string): RawScore {
   }
 
   const rootTag = tag(root);
-  if (rootTag === "score-timewise") return finalize(parseTimewise(root));
+  if (rootTag === "score-timewise") return finalize(parseTimewise(root, options));
   if (rootTag !== "score-partwise") {
     throw new Error("需要 partwise 或 timewise MusicXML（.musicxml / .xml / .mxl）。");
   }
-  return finalize(parsePartwise(root));
+  return finalize(parsePartwise(root, options));
 }
 
 function readPartList(root: XmlElement): Map<string, { name: string; abbr: string; midiProgram?: number }> {
@@ -173,7 +182,7 @@ function titleOf(root: XmlElement): string {
   );
 }
 
-function parsePartwise(root: XmlElement): { title: string; parts: LocalPart[]; warnings: string[] } {
+function parsePartwise(root: XmlElement, options: ParseOptions): { title: string; parts: LocalPart[]; warnings: string[] } {
   const meta = readPartList(root);
   const warnings: string[] = [];
   const parts: LocalPart[] = [];
@@ -183,12 +192,12 @@ function parsePartwise(root: XmlElement): { title: string; parts: LocalPart[]; w
     const id = partEl.getAttribute("id") || `P${index}`;
     const info = meta.get(id);
     const measures = children(partEl).filter((c) => tag(c) === "measure");
-    parts.push(parsePart(id, info?.name || "", info?.abbr || "", info?.midiProgram, measures, warnings));
+    parts.push(parsePart(id, info?.name || "", info?.abbr || "", info?.midiProgram, measures, warnings, options));
   }
   return { title: titleOf(root), parts, warnings };
 }
 
-function parseTimewise(root: XmlElement): { title: string; parts: LocalPart[]; warnings: string[] } {
+function parseTimewise(root: XmlElement, options: ParseOptions): { title: string; parts: LocalPart[]; warnings: string[] } {
   const meta = readPartList(root);
   const warnings: string[] = ["已从 timewise MusicXML 转成按声部的时间轴。"];
   const buckets = new Map<string, XmlElement[]>();
@@ -213,7 +222,7 @@ function parseTimewise(root: XmlElement): { title: string; parts: LocalPart[]; w
     index++;
     const info = meta.get(id);
     parts.push(
-      parsePart(id || `P${index}`, info?.name || "", info?.abbr || "", info?.midiProgram, buckets.get(id) ?? [], warnings),
+      parsePart(id || `P${index}`, info?.name || "", info?.abbr || "", info?.midiProgram, buckets.get(id) ?? [], warnings, options),
     );
   }
   return { title: titleOf(root), parts, warnings };
@@ -226,6 +235,7 @@ function parsePart(
   midiProgram: number | undefined,
   measureEls: XmlElement[],
   warnings: string[],
+  options: ParseOptions,
 ): LocalPart {
   const part: LocalPart = {
     id,
@@ -369,21 +379,45 @@ function parsePart(
     const signature = measureLengthBeats(meterForLength);
     const content = Math.max(0, maxEnd - measureStart);
     let length = signature;
+    let measureNotes = notes;
+    const measureLabel = measureEl.getAttribute("number") || String(measureIndex + 1);
     if (implicit) length = content > 0.01 ? content : signature;
-    else if (content > signature + 0.05) {
+    else if (options.lockToMeter && content > signature + 0.05) {
+      const end = measureStart + signature;
+      let trimmed = false;
+      measureNotes = [];
+      for (const note of notes) {
+        if (note.startBeat >= end - 0.01) {
+          trimmed = true;
+          continue;
+        }
+        if (note.startBeat + note.durationBeats > end + 0.02) {
+          trimmed = true;
+          measureNotes.push({ ...note, durationBeats: Math.max(1 / 16, end - note.startBeat) });
+        } else {
+          measureNotes.push(note);
+        }
+      }
+      length = signature;
+      if (trimmed) {
+        warnings.push(
+          `${name || id} 第 ${measureLabel} 小节时值对不齐，已裁到小节线，后面的音乐不后移。`,
+        );
+      }
+    } else if (content > signature + 0.05) {
       length = content;
-      warnings.push(`${name || id} 第 ${measureEl.getAttribute("number") || measureIndex + 1} 小节超出拍号，已拉长该小节以免叠到下一小节。`);
+      warnings.push(`${name || id} 第 ${measureLabel} 小节超出拍号，已拉长该小节以免叠到下一小节。`);
     }
     if (!(length > 0.01)) length = signature > 0.01 ? signature : 4;
 
     part.measures.push({
-      number: measureEl.getAttribute("number") || String(measureIndex + 1),
+      number: measureLabel,
       implicit,
       startBeat: measureStart,
       lengthBeats: length,
       beats: meterForLength.beats,
       beatType: meterForLength.beatType,
-      notes: mergeTies(notes),
+      notes: mergeTies(measureNotes),
       fifths,
       mode,
     });
