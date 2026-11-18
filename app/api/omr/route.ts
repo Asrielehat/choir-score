@@ -62,7 +62,22 @@ export async function POST(request: Request) {
       const preview = await previewJpeg(image);
       if (preview) previews.push({ label: isPdf ? `第 ${page} 页` : file.name, href: preview });
       const outdir = join(dir, `out-${page}`);
-      const stderr = await run(engine, ["-batch", "-transcribe", "-export", "-swap", "-output", outdir, image], 240_000);
+      const languages = exists("/opt/audiveris/tessdata/chi_sim.traineddata") ? "chi_sim+eng" : "eng";
+      const stderr = await run(
+        engine,
+        [
+          "-batch",
+          "-transcribe",
+          "-export",
+          "-swap",
+          "-constant",
+          `org.audiveris.omr.text.Language.defaultSpecification=${languages}`,
+          "-output",
+          outdir,
+          image,
+        ],
+        240_000,
+      );
       const produced = await findScore(outdir);
       if (!produced) {
         warnings.push(`第 ${page} 页没有导出 MusicXML，已跳过。`);

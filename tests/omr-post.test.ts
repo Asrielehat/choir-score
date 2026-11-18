@@ -34,10 +34,13 @@ describe("OMR post-processing", () => {
     );
     const locked = parseMusicXml(xml, { lockToMeter: true });
     const soprano = locked.parts[0].notes;
-    expect(soprano.map((item) => item.startBeat)).toEqual([0, 1, 2, 3, 4]);
-    expect(soprano[4].midi).toBe(71);
+    expect(soprano).toHaveLength(6);
+    expect(soprano.slice(0, 5).map((item) => item.midi)).toEqual([72, 74, 76, 77, 79]);
+    expect(soprano.slice(0, 5).map((item) => item.durationBeats)).toEqual([0.8, 0.8, 0.8, 0.8, 0.8]);
+    expect(soprano[5].midi).toBe(71);
+    expect(soprano[5].startBeat).toBeCloseTo(4);
     expect(locked.measures[1].startBeat).toBeCloseTo(4);
-    expect(locked.warnings.some((warning) => warning.includes("裁到小节线"))).toBe(true);
+    expect(locked.warnings.some((warning) => warning.includes("压进拍号"))).toBe(true);
 
     const loose = parseMusicXml(xml);
     expect(loose.parts[0].notes.map((item) => item.startBeat)).toEqual([0, 1, 2, 3, 4, 5]);
@@ -235,5 +238,77 @@ describe("OMR post-processing", () => {
     expect(readMetronomeBpm("Allegro q = 96")).toBe(96);
     expect(readMetronomeBpm("page 12")).toBeNull();
     expect(readMetronomeBpm("= 300")).toBeNull();
+  });
+
+  it("shortens unbeamed quarters to match a voice in the same bar that already fits", () => {
+    const voice = (id: string, durations: number[], midis: number[]) => `<part id="${id}"><measure number="1">
+      <attributes><divisions>2</divisions><time><beats>4</beats><beat-type>4</beat-type></time></attributes>
+      ${durations.map((duration, index) => note({ midi: midis[index], duration })).join("")}
+    </measure></part>`;
+    const xml = partwise(
+      [scorePart("P1", "Soprano"), scorePart("P2", "Alto")].join(""),
+      [
+        voice("P1", [1, 1, 1, 1, 4], [74, 72, 74, 76, 76]),
+        voice("P2", [2, 2, 2, 2, 4], [69, 67, 69, 71, 71]),
+      ].join(""),
+    );
+    const project = projectFromMusicXml(xml, { fromOmr: true });
+    const alto = project.notes.filter((item) => item.trackId === "alto");
+    expect(alto.map((item) => item.durationBeats)).toEqual([0.5, 0.5, 0.5, 0.5, 2]);
+    expect(alto.map((item) => item.midi)).toEqual([69, 67, 69, 71, 71]);
+  });
+
+  it("halves a run of quarters when that is the only way the bar adds up", () => {
+    const xml = partwise(
+      scorePart("P1", "Soprano"),
+      `<part id="P1"><measure number="1">
+        <attributes><divisions>2</divisions><time><beats>4</beats><beat-type>4</beat-type></time></attributes>
+        ${[74, 72, 74, 76].map((midi) => note({ midi, duration: 2 })).join("")}
+        ${note({ midi: 76, duration: 4 })}
+      </measure></part>`,
+    );
+    const project = projectFromMusicXml(xml, { fromOmr: true });
+    expect(project.notes.map((item) => item.durationBeats)).toEqual([0.5, 0.5, 0.5, 0.5, 2]);
+    expect(project.warnings.some((warning) => warning.includes("缩短"))).toBe(true);
+  });
+
+  it("does not merge a tie whose pitches differ, whose lyric is a new syllable, or that glues a whole bar to a long note", () => {
+    const differentPitch = partwise(
+      scorePart("P1", "Soprano"),
+      `<part id="P1"><measure number="1">
+        <attributes><divisions>1</divisions><time><beats>4</beats><beat-type>4</beat-type></time></attributes>
+        ${note({ midi: 72, duration: 2, tie: "start" })}
+        ${note({ midi: 74, duration: 2, tie: "stop" })}
+      </measure></part>`,
+    );
+    expect(parseMusicXml(differentPitch, { lockToMeter: true }).parts[0].notes).toHaveLength(2);
+
+    const newSyllable = partwise(
+      scorePart("P1", "Soprano"),
+      `<part id="P1"><measure number="1">
+        <attributes><divisions>1</divisions><time><beats>4</beats><beat-type>4</beat-type></time></attributes>
+        ${note({ midi: 72, duration: 2, tie: "start", lyric: "在" })}
+        ${note({ midi: 72, duration: 2, tie: "stop", lyric: "心" })}
+      </measure></part>`,
+    );
+    const syllables = parseMusicXml(newSyllable, { lockToMeter: true }).parts[0].notes;
+    expect(syllables).toHaveLength(2);
+    expect(syllables.map((item) => item.lyric)).toEqual(["在", "心"]);
+
+    const slur = partwise(
+      scorePart("P1", "Bass"),
+      `<part id="P1">
+        <measure number="1">
+          <attributes><divisions>1</divisions><time><beats>4</beats><beat-type>4</beat-type></time></attributes>
+          ${note({ midi: 55, duration: 4, tie: "start" })}
+        </measure>
+        <measure number="2">
+          ${note({ midi: 55, duration: 3, tie: "stop" })}
+          ${note({ rest: true, duration: 1 })}
+        </measure>
+      </part>`,
+    );
+    const held = parseMusicXml(slur, { lockToMeter: true }).parts[0].notes;
+    expect(held.map((item) => item.durationBeats)).toEqual([4, 3]);
   });
 });

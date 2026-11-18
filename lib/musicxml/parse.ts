@@ -1,4 +1,6 @@
 import { DOMParser, type Element as XmlElement } from "@xmldom/xmldom";
+import { sanitizeLyrics } from "../lyrics";
+import { repairOverfullMeasure, type RhythmSlot, type RhythmVoice } from "../rhythm";
 import type { KeyPoint, MeasureSpan, MeterPoint, TempoPoint } from "../types";
 import { measureLengthBeats } from "../timing";
 
@@ -15,6 +17,15 @@ export interface RawNote {
   measureIndex: number;
   tieStart?: boolean;
   tieStop?: boolean;
+  /** A beam was printed on this note, so its duration is less likely to be a doubled eighth. */
+  beamed?: boolean;
+}
+
+interface RawRest {
+  voice: number;
+  staff: number;
+  startBeat: number;
+  durationBeats: number;
 }
 
 export interface RawPart {
@@ -45,6 +56,7 @@ interface LocalMeasure {
   beats: number;
   beatType: number;
   notes: RawNote[];
+  rests: RawRest[];
   fifths?: number;
   mode?: "major" | "minor";
 }
@@ -267,6 +279,7 @@ function parsePart(
     let meterForLength = { beats, beatType };
     const implicit = measureEl.getAttribute("implicit") === "yes";
     const notes: RawNote[] = [];
+    const rests: RawRest[] = [];
     let fifths: number | undefined;
     let mode: "major" | "minor" | undefined;
 
@@ -356,7 +369,15 @@ function parsePart(
         lastStart = start;
         bump(cursor);
       }
-      if (isRest) continue;
+      if (isRest) {
+        rests.push({
+          voice: Math.max(1, num(child(el, "voice"), 1)),
+          staff: Math.max(1, num(child(el, "staff"), 1)),
+          startBeat: start,
+          durationBeats: Math.max(0, dur),
+        });
+        continue;
+      }
       const midi = readPitch(el, transpose);
       if (midi == null) continue;
       bump(start + dur);
@@ -375,6 +396,7 @@ function parsePart(
         measureIndex,
         tieStart,
         tieStop,
+        beamed: kids(el, "beam").length > 0,
       });
       const staffN = notes[notes.length - 1].staff;
       if (staffN > part.staves) part.staves = staffN;
@@ -387,27 +409,10 @@ function parsePart(
     const measureLabel = measureEl.getAttribute("number") || String(measureIndex + 1);
     if (implicit) length = content > 0.01 ? content : signature;
     else if (options.lockToMeter && content > signature + 0.05) {
-      const end = measureStart + signature;
-      let trimmed = false;
-      measureNotes = [];
-      for (const note of notes) {
-        if (note.startBeat >= end - 0.01) {
-          trimmed = true;
-          continue;
-        }
-        if (note.startBeat + note.durationBeats > end + 0.02) {
-          trimmed = true;
-          measureNotes.push({ ...note, durationBeats: Math.max(1 / 16, end - note.startBeat) });
-        } else {
-          measureNotes.push(note);
-        }
-      }
+      // Keep every note. finalize() tries to make the bar add up, and if it
+      // cannot, squeezes the notes into the bar instead of deleting them.
+      measureNotes = notes;
       length = signature;
-      if (trimmed) {
-        warnings.push(
-          `${name || id} 第 ${measureLabel} 小节时值对不齐，已裁到小节线，后面的音乐不后移。`,
-        );
-      }
     } else if (content > signature + 0.05) {
       length = content;
       warnings.push(`${name || id} 第 ${measureLabel} 小节超出拍号，已拉长该小节以免叠到下一小节。`);
@@ -421,7 +426,8 @@ function parsePart(
       lengthBeats: length,
       beats: meterForLength.beats,
       beatType: meterForLength.beatType,
-      notes: mergeTies(measureNotes),
+      notes: options.lockToMeter ? measureNotes : mergeTies(measureNotes),
+      rests,
       fifths,
       mode,
     });
@@ -490,7 +496,7 @@ function readTempo(el: XmlElement): number | null {
   return metro;
 }
 
-function mergeTies(notes: RawNote[]): RawNote[] {
+function mergeTies(notes: RawNote[], bars?: { start: number; length: number }[]): RawNote[] {
   const sorted = notes
     .filter((n) => n.durationBeats > 0)
     .slice()
@@ -501,7 +507,7 @@ function mergeTies(notes: RawNote[]): RawNote[] {
     const key = `${note.staff}|${note.voice}|${note.midi}`;
     if (note.tieStop) {
       const prev = open.get(key);
-      if (prev && Math.abs(prev.startBeat + prev.durationBeats - note.startBeat) < 0.03) {
+      if (prev && tieCanJoin(prev, note, bars)) {
         prev.durationBeats += note.durationBeats;
         if (!prev.lyric && note.lyric) prev.lyric = note.lyric;
         if (note.tieStart) open.set(key, prev);
@@ -512,12 +518,144 @@ function mergeTies(notes: RawNote[]): RawNote[] {
     const copy = { ...note };
     out.push(copy);
     if (note.tieStart) open.set(key, copy);
+    else open.delete(key);
   }
   return out;
 }
 
+function tieCanJoin(prev: RawNote, note: RawNote, bars?: { start: number; length: number }[]): boolean {
+  if (prev.midi !== note.midi || prev.staff !== note.staff || prev.voice !== note.voice) return false;
+  if (Math.abs(prev.startBeat + prev.durationBeats - note.startBeat) >= 0.03) return false;
+  if (prev.lyric && note.lyric && prev.lyric !== note.lyric) return false;
+  if (!bars) return true;
+  const bar = bars.find((item) => prev.startBeat >= item.start - 0.02 && prev.startBeat < item.start + item.length - 0.02);
+  const barLength = bar?.length ?? 4;
+  if (prev.durationBeats + note.durationBeats > barLength * 2 + 0.05) return false;
+  // A note that already fills its bar, tied to a long note in the next bar, is usually a slur.
+  if (prev.durationBeats >= barLength - 0.05 && note.durationBeats > barLength / 2 + 0.05) return false;
+  return true;
+}
+
+function repairMeasures(parts: LocalPart[], warnings: string[]) {
+  const count = Math.max(0, ...parts.map((part) => part.measures.length));
+  for (let index = 0; index < count; index++) {
+    const present = parts.map((part) => part.measures[index]).filter((measure): measure is LocalMeasure => !!measure);
+    if (!present.length || present.some((measure) => measure.implicit)) continue;
+    const signature = present[0].lengthBeats;
+    const built: {
+      part: LocalPart;
+      voice: number;
+      voiceId: string;
+      slots: RhythmSlot[];
+      sources: (RawNote[] | null)[];
+      entry: number;
+    }[] = [];
+    for (const part of parts) {
+      const measure = part.measures[index];
+      if (!measure) continue;
+      const voices = new Set<number>([
+        ...measure.notes.map((note) => note.voice),
+        ...measure.rests.map((rest) => rest.voice),
+      ]);
+      for (const voice of voices) {
+        const notes = measure.notes.filter((note) => note.voice === voice);
+        const rests = measure.rests.filter((rest) => rest.voice === voice);
+        const builtVoice = slotsOf(notes, rests, measure.startBeat);
+        built.push({ part, voice, voiceId: `${part.id}|v${voice}`, ...builtVoice });
+      }
+    }
+    if (!built.length) continue;
+    const repaired = repairOverfullMeasure(
+      built.map((item): RhythmVoice => ({ id: item.voiceId, slots: item.slots, entry: item.entry })),
+      signature,
+      present[0].number,
+    );
+    if (repaired.warning) warnings.push(repaired.warning);
+    repaired.voices.forEach((voice, voiceIndex) => {
+      if (voice.kind === "ok") return;
+      const source = built[voiceIndex];
+      const measure = source.part.measures[index];
+      const kept = new Set<RawNote>();
+      let cursor = measure.startBeat + source.entry;
+      voice.slots.forEach((slot) => {
+        const originals = slot.key ? source.sources[Number(slot.key)] : null;
+        if (originals) {
+          for (const note of originals) {
+            note.startBeat = cursor;
+            note.durationBeats = slot.duration;
+            kept.add(note);
+          }
+        }
+        cursor += slot.duration;
+      });
+      measure.notes = measure.notes.filter((note) => note.voice !== source.voice || kept.has(note));
+    });
+  }
+}
+
+function slotsOf(
+  notes: RawNote[],
+  rests: RawRest[],
+  measureStart: number,
+): { slots: RhythmSlot[]; sources: (RawNote[] | null)[]; entry: number } {
+  interface Event {
+    start: number;
+    duration: number;
+    rest: boolean;
+    notes: RawNote[];
+  }
+  const events: Event[] = [];
+  const groups = new Map<number, RawNote[]>();
+  for (const note of notes) {
+    const key = Math.round((note.startBeat - measureStart) * 1000);
+    const group = groups.get(key);
+    if (group) group.push(note);
+    else groups.set(key, [note]);
+  }
+  for (const group of groups.values()) {
+    events.push({
+      start: group[0].startBeat - measureStart,
+      duration: group[0].durationBeats,
+      rest: false,
+      notes: group,
+    });
+  }
+  for (const rest of rests) {
+    events.push({ start: rest.startBeat - measureStart, duration: rest.durationBeats, rest: true, notes: [] });
+  }
+  events.sort((a, b) => a.start - b.start || Number(a.rest) - Number(b.rest));
+  const slots: RhythmSlot[] = [];
+  const sources: (RawNote[] | null)[] = [];
+  if (!events.length) return { slots, sources, entry: 0 };
+  const entry = Math.max(0, events[0].start);
+  let cursor = entry;
+  for (const event of events) {
+    if (event.start > cursor + 0.04) {
+      slots.push({ duration: event.start - cursor, rest: true, pitches: [] });
+      sources.push(null);
+      cursor = event.start;
+    }
+    slots.push({
+      duration: event.duration,
+      rest: event.rest,
+      pitches: event.notes.map((note) => note.midi),
+      tieStart: event.notes.some((note) => note.tieStart),
+      tieStop: event.notes.some((note) => note.tieStop),
+      beamed: event.notes.some((note) => note.beamed),
+      key: String(slots.length),
+    });
+    sources.push(event.rest ? null : event.notes);
+    cursor = Math.max(cursor, event.start + event.duration);
+  }
+  return { slots, sources, entry };
+}
+
 function finalize(parsed: { title: string; parts: LocalPart[]; warnings: string[] }, options: ParseOptions): RawScore {
   const warnings = parsed.warnings.slice();
+  if (options.lockToMeter) repairMeasures(parsed.parts, warnings);
+  if (options.lockToMeter) {
+    sanitizeLyrics(parsed.parts.flatMap((part) => part.measures.flatMap((measure) => measure.notes)));
+  }
   if (!parsed.parts.length) warnings.push("谱面里没有声部。");
   const ref = parsed.parts.reduce<LocalPart | null>((best, part) => {
     if (!best || part.measures.length > best.measures.length) return part;
@@ -539,7 +677,7 @@ function finalize(parsed: { title: string; parts: LocalPart[]; warnings: string[
         notes.push({ ...note, startBeat: note.startBeat + (target == null ? 0 : delta) });
       }
     });
-    const merged = mergeTies(notes);
+    const merged = mergeTies(notes, options.lockToMeter ? part.measures.map((measure) => ({ start: measure.startBeat, length: measure.lengthBeats })) : undefined);
     return {
       id: part.id,
       name: part.name,

@@ -65,7 +65,9 @@ curl -L -o /opt/audiveris/tessdata/eng.traineddata \
   https://github.com/tesseract-ocr/tessdata/raw/main/eng.traineddata
 ```
 
-Audiveris 的文字识别走 Tesseract 的 legacy 引擎。发行版自带的 `eng` 数据往往只有 LSTM，歌词会是空的，所以上面要另下一份 `tessdata`。接口在 `/opt/audiveris/bin/Audiveris` 存在时就会用它。扫描页先栅格化成 300 DPI PNG。识别结果旁边可以对照缩小后的原页。小节时值对不齐时裁到小节线，不把后面的音乐往后推。
+Audiveris 的文字识别走 Tesseract 的 legacy 引擎。发行版自带的 `eng` 数据往往只有 LSTM，歌词会是空的，所以上面要另下一份 `tessdata`。中文歌词再加一份 `chi_sim.traineddata`（同一个 tessdata 仓库）；文件在时，接口会让 Audiveris 用 `chi_sim+eng`。接口在 `/opt/audiveris/bin/Audiveris` 存在时就会用它。扫描页先栅格化成 300 DPI PNG。400 DPI 在最密的一页上少了一些时值错误，但会漏掉升降号、也会少音符，所以仍用 300 DPI，时值错误交给后面的小节修复。识别结果旁边可以对照缩小后的原页。
+
+小节若比拍号长，不会删掉越过小节线的音符。会先试这些改法：照同一小节里已经对齐的声部改时值、把一串被认长一倍的音符缩短、去掉多出来的附点或休止、把三个等长音符当三连音、拿掉一个离前后音很远的音。都不合适时，全部音符按比例压进拍号，并在警告里标出这一小节。连线只在同音、紧挨着、歌词不是两个不同的字时合并；占满整小节又接到下一小节的长音，多半是圆滑线，不再并成一个超长音。
 
 两份测试谱在 `public/samples/omr/`：
 
