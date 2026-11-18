@@ -4,7 +4,8 @@ export type Role =
   | "tenor"
   | "bass"
   | "piano-rh"
-  | "piano-lh";
+  | "piano-lh"
+  | "cello";
 
 export type Layer = "upper" | "lower" | "all";
 
@@ -107,6 +108,11 @@ export const ROLE_ORDER: Role[] = [
   "piano-lh",
 ];
 
+/** Shown only when the score actually has notes on that staff. */
+export const OPTIONAL_ROLES: Role[] = ["cello"];
+
+export const ALL_ROLES: Role[] = [...ROLE_ORDER, ...OPTIONAL_ROLES];
+
 export const ROLE_META: Record<Role, RoleMeta> = {
   soprano: {
     name: "Soprano",
@@ -150,6 +156,13 @@ export const ROLE_META: Record<Role, RoleMeta> = {
     shortZh: "左",
     color: "#8d7cc2",
   },
+  cello: {
+    name: "Cello",
+    nameZh: "大提琴",
+    short: "Vc",
+    shortZh: "Vc",
+    color: "#e08a4f",
+  },
 };
 
 export function makeTrack(role: Role): Track {
@@ -167,5 +180,12 @@ export function makeTrack(role: Role): Track {
 }
 
 export function isRole(value: string): value is Role {
-  return (ROLE_ORDER as string[]).includes(value);
+  return (ALL_ROLES as string[]).includes(value);
+}
+
+export function rolesWithNotes(notes: { trackId: string }[]): Role[] {
+  return [
+    ...ROLE_ORDER,
+    ...OPTIONAL_ROLES.filter((role) => notes.some((note) => note.trackId === role)),
+  ];
 }

@@ -1,14 +1,15 @@
 import { spawn } from "node:child_process";
 import { accessSync, constants } from "node:fs";
-import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { NextResponse } from "next/server";
+import { readMetronomeBpm } from "@/lib/metronome";
 import { extractMxl } from "@/lib/mxl";
 import { omrUnavailable } from "@/lib/omr";
 
 export const runtime = "nodejs";
-export const maxDuration = 300;
+export const maxDuration = 600;
 
 const AUDIVERIS_CANDIDATES = ["/opt/audiveris/bin/Audiveris", "/usr/bin/audiveris"];
 const TESS_PREFIX =
@@ -26,8 +27,8 @@ export function GET() {
     command: engine,
     accepts: ["application/pdf", "image/png", "image/jpeg", "image/tiff"],
     returns: "application/vnd.recordare.musicxml+xml",
-    noteZh: "使用 Audiveris 5 把扫描页转成 MusicXML，再按合唱总谱拆成女高、女低、男高、男低和钢琴。",
-    noteEn: "Audiveris 5 turns a scanned page into MusicXML, then the choir layout splits SATB and piano.",
+    noteZh: "使用 Audiveris 5 把每一页转成 MusicXML，再接成一条时间线，拆成女高、女低、男高、男低、钢琴和大提琴。",
+    noteEn: "Audiveris 5 turns each page into MusicXML, then the pages join onto one timeline as SATB, piano, and cello.",
   });
 }
 
@@ -41,47 +42,61 @@ export async function POST(request: Request) {
     return NextResponse.json({ ok: false, messageZh: "没有上传文件。", messageEn: "No file uploaded." }, { status: 400 });
   }
 
-  const requestedPage = Math.max(1, Number(form?.get("page") || 1) || 1);
+  const pageSpec = String(form?.get("page") ?? "all");
   const dir = await mkdtemp(join(tmpdir(), "choir-omr-"));
   const safeName = file.name.replace(/[^\w.\u4e00-\u9fff-]+/g, "_") || "score.bin";
   const input = join(dir, safeName);
-  const outdir = join(dir, "out");
   await writeFile(input, Buffer.from(await file.arrayBuffer()));
 
   try {
-    const image = await rasterize(input, file.name, requestedPage, dir);
-    const preview = await previewJpeg(image);
-    const stderr = await run(engine, ["-batch", "-transcribe", "-export", "-swap", "-output", outdir, image], 240_000);
-    const produced = await findScore(outdir);
-    if (!produced) {
+    const isPdf = file.name.toLowerCase().endsWith(".pdf");
+    const total = isPdf ? await pdfPageCount(input) : 1;
+    const pages = pageList(pageSpec, total);
+    const musicxmls: string[] = [];
+    const previews: { label: string; href: string }[] = [];
+    const warnings: string[] = [];
+    let metronome: number | null = null;
+    for (const page of pages) {
+      const image = await rasterize(input, file.name, page, dir);
+      if (metronome == null && page === pages[0]) metronome = await headerMetronome(image);
+      const preview = await previewJpeg(image);
+      if (preview) previews.push({ label: isPdf ? `第 ${page} 页` : file.name, href: preview });
+      const outdir = join(dir, `out-${page}`);
+      const stderr = await run(engine, ["-batch", "-transcribe", "-export", "-swap", "-output", outdir, image], 240_000);
+      const produced = await findScore(outdir);
+      if (!produced) {
+        warnings.push(`第 ${page} 页没有导出 MusicXML，已跳过。`);
+        continue;
+      }
+      const bytes = await readFile(produced);
+      musicxmls.push(produced.toLowerCase().endsWith(".mxl") ? extractMxl(bytes) : bytes.toString("utf8"));
+      if (stderr.includes("too long")) {
+        warnings.push(`第 ${page} 页有小节时值偏长，导入时会裁到小节线，不把后面的音乐往后推。`);
+      }
+      if (stderr.includes("supported languages is empty") || stderr.includes("Missing support")) {
+        warnings.push("没有可用的文字识别语言包，歌词可能是空的。安装 tesseract-ocr-eng 后重试。");
+      }
+    }
+    if (!musicxmls.length) {
       return NextResponse.json(
         {
           ok: false,
           code: "omr_failed",
-          messageZh: "Audiveris 跑完了，但没有导出 MusicXML。扫描太淡、页码不对，或这一页不是乐谱。",
-          messageEn: "Audiveris finished without MusicXML. The scan may be faint, or this page is not music.",
-          stderr: stderr.slice(-2000),
+          messageZh: "Audiveris 跑完了，但没有导出 MusicXML。扫描太淡、页码不对，或这几页不是乐谱。",
+          messageEn: "Audiveris finished without MusicXML. The scan may be faint, or these pages are not music.",
         },
         { status: 502 },
       );
     }
-    const bytes = await readFile(produced);
-    const musicxml = produced.toLowerCase().endsWith(".mxl") ? extractMxl(bytes) : bytes.toString("utf8");
-    const warnings = stderr.includes("too long")
-      ? ["Audiveris 报告有小节时值偏长，导入时会裁到小节线，不把后面的音乐往后推。"]
-      : [];
-    if (stderr.includes("supported languages is empty") || stderr.includes("Missing support")) {
-      warnings.push("没有可用的文字识别语言包，歌词可能是空的。安装 tesseract-ocr-eng 后重试。");
-    }
     return NextResponse.json({
       ok: true,
       engine: "audiveris",
-      musicxml,
+      musicxml: musicxmls[0],
+      musicxmls,
+      metronome,
       filename: file.name,
       warnings,
-      pages: preview
-        ? [{ label: file.name.toLowerCase().endsWith(".pdf") ? `第 ${requestedPage} 页` : file.name, href: preview }]
-        : [],
+      pages: previews,
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -123,13 +138,43 @@ function resolveEngine(): string | null {
   return process.env.OMR_COMMAND || null;
 }
 
+function pageList(spec: string, total: number): number[] {
+  const text = spec.trim().toLowerCase();
+  const capped = Math.min(Math.max(total, 1), 16);
+  if (!text || text === "all" || text === "0") {
+    return Array.from({ length: capped }, (_, index) => index + 1);
+  }
+  const page = Math.max(1, Math.min(capped, Number(text) || 1));
+  return [page];
+}
+
+async function pdfPageCount(file: string): Promise<number> {
+  const log = await run("pdfinfo", [file], 20_000);
+  const match = log.match(/Pages:\s+(\d+)/);
+  return match ? Math.max(1, Number(match[1])) : 1;
+}
+
+async function headerMetronome(image: string): Promise<number | null> {
+  const header = `${image}.header.png`;
+  try {
+    // The metronome often sits under a title block, below the top sixth of the page.
+    await run("ffmpeg", ["-y", "-i", image, "-vf", "crop=iw:ih/4:0:0", header], 20_000);
+    const text = await run("tesseract", [header, "stdout", "-l", "eng", "--psm", "6"], 20_000);
+    return readMetronomeBpm(text);
+  } catch {
+    return null;
+  }
+}
+
 async function rasterize(input: string, filename: string, page: number, dir: string): Promise<string> {
   if (!filename.toLowerCase().endsWith(".pdf")) return input;
-  const prefix = join(dir, "page");
+  const folder = join(dir, `raster-${page}`);
+  await mkdir(folder, { recursive: true });
+  const prefix = join(folder, "img");
   await run("pdftoppm", ["-f", String(page), "-l", String(page), "-png", "-r", "300", input, prefix], 60_000);
-  const pngs = (await readdir(dir)).filter((name) => name.startsWith("page") && name.endsWith(".png"));
+  const pngs = (await readdir(folder)).filter((name) => name.startsWith("img") && name.endsWith(".png"));
   if (!pngs.length) throw new Error(`PDF 里没有第 ${page} 页。`);
-  return join(dir, pngs[0]);
+  return join(folder, pngs[0]);
 }
 
 async function previewJpeg(image: string): Promise<string | null> {

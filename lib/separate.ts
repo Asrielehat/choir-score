@@ -1,6 +1,7 @@
 import type { RawNote, RawPart, RawScore } from "./musicxml/parse";
+import { correctRoleOctaves } from "./sanity";
 import {
-  ROLE_META,
+  OPTIONAL_ROLES,
   ROLE_ORDER,
   makeTrack,
   type Layer,
@@ -19,6 +20,7 @@ export function roleFromName(name: string): NameKind {
   const n = name.trim();
   if (!n) return null;
   if (PIANO_RE.test(n)) return "piano";
+  if (/cello|violoncello|大提琴|^vc\.?$/i.test(n)) return "cello";
   if (/女高|sopran/i.test(n)) return "soprano";
   if (/女中|女低|contralto|\balto\b/i.test(n)) return "alto";
   if (/男高|\btenor\b/i.test(n)) return "tenor";
@@ -37,7 +39,7 @@ function pianoHand(name: string): Role | null {
   return null;
 }
 
-function isSpecificVoice(kind: NameKind): kind is Role {
+function isSpecificVoice(kind: NameKind): kind is "soprano" | "alto" | "tenor" | "bass" {
   return kind === "soprano" || kind === "alto" || kind === "tenor" || kind === "bass";
 }
 
@@ -190,8 +192,10 @@ function systemPlans(part: RawPart): StaffPlan[] | null {
     plans.push(single(vocal[1].staff, "alto", "下一行声部谱表", "Next vocal staff"));
   } else {
     const roles: Role[] = ["soprano", "alto", "tenor", "bass"];
-    vocal.slice(0, 4).forEach((feature, index) => {
-      const role = roles[index] ?? "bass";
+    vocal.forEach((feature, index) => {
+      let role = roles[index] ?? "bass";
+      // A bass-clef staff under the four voices, with no lyrics, is an instrument.
+      if (index >= 4 && feature.lyrics === 0 && (feature.clef === "F" || !feature.clef)) role = "cello";
       plans.push(single(feature.staff, role, `开大谱第 ${index + 1} 行`, `Open score staff ${index + 1}`));
     });
   }
@@ -209,20 +213,86 @@ function applyChoirPartOrder(parts: RawPart[], labels: NameKind[], counts: numbe
     .map((_, index) => index)
     .filter((index) => {
       const label = labels[index];
-      return counts[index] === 1 && !isSpecificVoice(label) && label !== "piano" && label !== "choir";
+      return counts[index] === 1 && !isSpecificVoice(label) && label !== "piano" && label !== "choir" && label !== "cello";
     });
-  const roles: NameKind[] =
-    singles.length >= 6
-      ? ["soprano", "alto", "tenor", "bass", "piano-rh", "piano-lh"]
-      : singles.length === 5
-        ? ["soprano", "alto", "tenor", "bass", "piano-rh"]
-        : singles.length === 4
-          ? ["soprano", "alto", "tenor", "bass"]
-          : [];
-  if (!roles.length) return;
-  singles.slice(0, roles.length).forEach((index, order) => {
-    labels[index] = roles[order];
+  if (singles.length < 2) return;
+  const feats = singles.map((index) => {
+    const clef = parts[index].clefs.find((item) => item.staff === 1) ?? parts[index].clefs[0];
+    return {
+      index,
+      clef: clef?.sign,
+      octave: clef?.octaveChange ?? 0,
+      lyrics: hasLyrics(parts[index]),
+      lyricCount: parts[index].notes.filter((note) => note.lyric).length,
+      median: median(parts[index].notes),
+    };
   });
+  const anyClef = feats.some((feature) => feature.clef);
+  if (!anyClef) {
+    const roles: NameKind[] =
+      feats.length >= 6
+        ? ["soprano", "alto", "tenor", "bass", "piano-rh", "piano-lh"]
+        : feats.length === 5
+          ? ["soprano", "alto", "tenor", "bass", "piano-rh"]
+          : feats.length === 4
+            ? ["soprano", "alto", "tenor", "bass"]
+            : [];
+    feats.slice(0, roles.length).forEach((feature, order) => {
+      labels[feature.index] = roles[order];
+    });
+    return;
+  }
+
+  const taken = new Set<number>();
+  // Grand staff at the bottom: treble over bass, not another singing part.
+  if (feats.length >= 5) {
+    const right = feats[feats.length - 2];
+    const left = feats[feats.length - 1];
+    const vocal = feats.slice(0, -2);
+    const vocalLyrics = vocal.reduce((sum, feature) => sum + feature.lyricCount, 0);
+    const pianoLyrics = right.lyricCount + left.lyricCount;
+    const leftIsBass = left.clef === "F" || (!left.clef && left.median + 3 < right.median);
+    if (leftIsBass && right.clef !== "F" && pianoLyrics <= Math.max(1, vocalLyrics * 0.35)) {
+      labels[right.index] = "piano-rh";
+      labels[left.index] = "piano-lh";
+      taken.add(right.index);
+      taken.add(left.index);
+    }
+  }
+  if (!taken.size && feats.length === 5) {
+    const last = feats[feats.length - 1];
+    if (last.clef !== "F" && !last.lyrics) {
+      labels[last.index] = "piano-rh";
+      taken.add(last.index);
+    }
+  }
+
+  const vocal = feats.filter((feature) => !taken.has(feature.index));
+  const bassClefs = vocal.filter((feature) => feature.clef === "F");
+  // The upper bass-clef staff is the choir bass. A lower one without lyrics is an instrument.
+  if (bassClefs.length >= 2) {
+    for (const extra of bassClefs.slice(1)) {
+      if (!extra.lyrics) {
+        labels[extra.index] = "cello";
+        taken.add(extra.index);
+      }
+    }
+  }
+
+  const voices = vocal.filter((feature) => !taken.has(feature.index));
+  const assigned = new Map<number, Role>();
+  const tenor = voices.find((feature) => feature.octave < 0 && feature.clef !== "F");
+  if (tenor) assigned.set(tenor.index, "tenor");
+  const bass = voices.find((feature) => !assigned.has(feature.index) && feature.clef === "F");
+  if (bass) assigned.set(bass.index, "bass");
+  const rest = voices.filter((feature) => !assigned.has(feature.index));
+  const open: Role[] = (["soprano", "alto", "tenor", "bass"] as Role[]).filter(
+    (role) => ![...assigned.values()].includes(role),
+  );
+  rest.forEach((feature, index) => {
+    assigned.set(feature.index, open[index] ?? "bass");
+  });
+  for (const [index, role] of assigned) labels[index] = role;
 }
 
 function planStaves(parts: RawPart[], options: SeparateOptions = {}): StaffPlan[] {
@@ -268,6 +338,7 @@ function planStaves(parts: RawPart[], options: SeparateOptions = {}): StaffPlan[
         counts[i] === 1 &&
         !isSpecificVoice(labels[i]) &&
         labels[i] !== "piano" &&
+        labels[i] !== "cello" &&
         splitEvidence(part.notes),
     );
   if (polyphonic.length === 2 && !labels.includes("choir")) {
@@ -322,6 +393,21 @@ function planStaves(parts: RawPart[], options: SeparateOptions = {}): StaffPlan[
         reasonZh: shared.reasonZh,
         reasonEn: shared.reasonEn,
       });
+      return;
+    }
+
+    if (label === "cello") {
+      for (let staff = 1; staff <= staves; staff++) {
+        plans.push({
+          partId: part.id,
+          partName,
+          staff,
+          mode: "single",
+          upper: "cello",
+          reasonZh: "大提琴声部，不并进合唱",
+          reasonEn: "Cello staff, kept off the choir",
+        });
+      }
       return;
     }
 
@@ -693,16 +779,23 @@ export function separateScore(score: RawScore, options: SeparateOptions = {}): S
   }
   notes.sort((a, b) => a.startBeat - b.startBeat || a.midi - b.midi);
 
-  const tracks = ROLE_ORDER.map((role) => {
-    const track = makeTrack(role);
-    if (!notes.some((note) => note.trackId === role)) track.volume = ROLE_META[role] ? track.volume : track.volume;
-    return track;
-  });
+  let voiced = notes;
+  if (options.choirLayout) {
+    const corrected = correctRoleOctaves(notes);
+    voiced = corrected.notes;
+    warnings.push(...corrected.warnings);
+  }
+
+  const roles = [
+    ...ROLE_ORDER,
+    ...OPTIONAL_ROLES.filter((role) => voiced.some((note) => note.trackId === role)),
+  ];
+  const tracks = roles.map((role) => makeTrack(role));
 
   return {
     title: score.title || "未命名",
     tracks,
-    notes,
+    notes: voiced,
     streams,
     tempos: score.tempos.length ? score.tempos : [{ beat: 0, bpm: 120 }],
     meters: score.meters.length ? score.meters : [{ beat: 0, beats: 4, beatType: 4 }],

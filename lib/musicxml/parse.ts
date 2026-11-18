@@ -125,6 +125,10 @@ export interface ParseOptions {
    * every later bar to the right.
    */
   lockToMeter?: boolean;
+  /** Meter in force at the start of this page, when the page itself reprints none. */
+  initialMeter?: { beats: number; beatType: number };
+  /** Key in force at the start of this page, when the page itself reprints none. */
+  initialKey?: { fifths: number; mode: "major" | "minor" };
 }
 
 export function parseMusicXml(xml: string, options: ParseOptions = {}): RawScore {
@@ -145,11 +149,11 @@ export function parseMusicXml(xml: string, options: ParseOptions = {}): RawScore
   }
 
   const rootTag = tag(root);
-  if (rootTag === "score-timewise") return finalize(parseTimewise(root, options));
+  if (rootTag === "score-timewise") return finalize(parseTimewise(root, options), options);
   if (rootTag !== "score-partwise") {
     throw new Error("需要 partwise 或 timewise MusicXML（.musicxml / .xml / .mxl）。");
   }
-  return finalize(parsePartwise(root, options));
+  return finalize(parsePartwise(root, options), options);
 }
 
 function readPartList(root: XmlElement): Map<string, { name: string; abbr: string; midiProgram?: number }> {
@@ -249,8 +253,8 @@ function parsePart(
     keys: [],
   };
   let divisions = 1;
-  let beats = 4;
-  let beatType = 4;
+  let beats = options.initialMeter?.beats && options.initialMeter.beats > 0 ? options.initialMeter.beats : 4;
+  let beatType = options.initialMeter?.beatType && options.initialMeter.beatType > 0 ? options.initialMeter.beatType : 4;
   let transpose = { chromatic: 0, octave: 0 };
   let globalBeat = 0;
   let warnedDivisions = false;
@@ -512,7 +516,7 @@ function mergeTies(notes: RawNote[]): RawNote[] {
   return out;
 }
 
-function finalize(parsed: { title: string; parts: LocalPart[]; warnings: string[] }): RawScore {
+function finalize(parsed: { title: string; parts: LocalPart[]; warnings: string[] }, options: ParseOptions): RawScore {
   const warnings = parsed.warnings.slice();
   if (!parsed.parts.length) warnings.push("谱面里没有声部。");
   const ref = parsed.parts.reduce<LocalPart | null>((best, part) => {
@@ -590,6 +594,9 @@ function finalize(parsed: { title: string; parts: LocalPart[]; warnings: string[
   const keys: KeyPoint[] = [];
   const refKeys = ref?.keys ?? [];
   for (const key of refKeys) keys.push(key);
+  if (!keys.length && options.initialKey) {
+    keys.push({ beat: 0, fifths: options.initialKey.fifths, mode: options.initialKey.mode });
+  }
 
   return {
     title: parsed.title,

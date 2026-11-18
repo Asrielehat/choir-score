@@ -1,5 +1,5 @@
 import { ensureMeasures, projectEndBeat } from "../timing";
-import { ROLE_META, ROLE_ORDER, type KeyPoint, type Role, type ScoreProject } from "../types";
+import { OPTIONAL_ROLES, ROLE_META, ROLE_ORDER, type KeyPoint, type Role, type ScoreProject } from "../types";
 
 const DIVISIONS = 480;
 
@@ -20,7 +20,7 @@ function pitchXml(midi: number): string {
 }
 
 function clefXml(role: Role): string {
-  if (role === "bass" || role === "piano-lh") return `<clef><sign>F</sign><line>4</line></clef>`;
+  if (role === "bass" || role === "piano-lh" || role === "cello") return `<clef><sign>F</sign><line>4</line></clef>`;
   if (role === "tenor") return `<clef><sign>G</sign><line>2</line><clef-octave-change>-1</clef-octave-change></clef>`;
   return `<clef><sign>G</sign><line>2</line></clef>`;
 }
@@ -41,7 +41,7 @@ function tick(beat: number): number {
 export function exportMusicXml(project: ScoreProject): string {
   const endBeat = projectEndBeat(project);
   const measures = ensureMeasures(project, endBeat);
-  const roles = ROLE_ORDER.filter((role) => project.notes.some((note) => note.trackId === role));
+  const roles = [...ROLE_ORDER, ...OPTIONAL_ROLES].filter((role) => project.notes.some((note) => note.trackId === role));
   const used = roles.length ? roles : (["soprano"] as Role[]);
   const partList = used
     .map((role, index) => {

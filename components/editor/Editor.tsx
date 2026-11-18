@@ -25,10 +25,10 @@ import { Switch } from "@/components/ui/switch";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { engine } from "@/lib/audio";
 import type { OmrStatus } from "@/lib/omr";
-import { importScoreBytes, projectFromMusicXml, serializeProject, STORAGE_KEY, deserializeProject, toMidi, toMusicXml } from "@/lib/project";
+import { importScoreBytes, projectFromMusicXml, projectFromOmrPages, serializeProject, STORAGE_KEY, deserializeProject, toMidi, toMusicXml } from "@/lib/project";
 import { persistSoon, useEditor, type Locale } from "@/lib/store";
 import { locateBeat, projectEndBeat } from "@/lib/timing";
-import { ROLE_META, ROLE_ORDER, type Role } from "@/lib/types";
+import { ALL_ROLES, ROLE_META, type Role } from "@/lib/types";
 import { downloadBlob, safeFileStem } from "@/lib/utils";
 import { AssignDialog, HelpDialog, OmrDialog } from "./Dialogs";
 import { PianoRoll } from "./PianoRoll";
@@ -56,7 +56,7 @@ export function Editor() {
   const [helpOpen, setHelpOpen] = useState(false);
   const [omrOpen, setOmrOpen] = useState(false);
   const [omrStatus, setOmrStatus] = useState<OmrStatus | null>(null);
-  const [pdfPage, setPdfPage] = useState(1);
+  const [pdfPage, setPdfPage] = useState("");
   const [busyLabel, setBusyLabel] = useState("");
   const [elapsed, setElapsed] = useState(0);
   const [showPage, setShowPage] = useState(true);
@@ -172,26 +172,36 @@ export function Editor() {
     }
   }
 
-  async function recognize(file: File, page = pdfPage) {
+  async function recognize(file: File, page: string | number = pdfPage) {
     useEditor.getState().setBusy(true);
     useEditor.getState().setError(null);
-    setBusyLabel(tr(useEditor.getState().locale, "Audiveris 正在读这页谱，通常要一分钟左右", "Audiveris is reading this page, usually about a minute"));
+    const everyPage = page === "" || page === "all" || page === 0;
+    setBusyLabel(
+      tr(
+        useEditor.getState().locale,
+        everyPage ? "Audiveris 正在逐页读谱，多页会接成一条时间线" : "Audiveris 正在读这一页，通常要一分钟左右",
+        everyPage ? "Audiveris is reading every page onto one timeline" : "Audiveris is reading this page, usually about a minute",
+      ),
+    );
     setElapsed(0);
     const started = Date.now();
     const timer = window.setInterval(() => setElapsed(Math.round((Date.now() - started) / 1000)), 500);
     try {
       const body = new FormData();
       body.set("file", file);
-      body.set("page", String(page));
+      body.set("page", everyPage ? "all" : String(page));
       const response = await fetch("/api/omr", { method: "POST", body });
       const data = (await response.json()) as OmrStatus & {
         ok?: boolean;
         musicxml?: string;
+        musicxmls?: string[];
+        metronome?: number | null;
         warnings?: string[];
         pages?: { label: string; href: string }[];
       };
-      if (data.ok && data.musicxml) {
-        const next = projectFromMusicXml(data.musicxml, { fromOmr: true });
+      const xmls = data.musicxmls?.length ? data.musicxmls : data.musicxml ? [data.musicxml] : [];
+      if (data.ok && xmls.length) {
+        const next = projectFromOmrPages(xmls, { bpm: data.metronome ?? null });
         next.sourceName = file.name;
         next.pages = data.pages ?? [];
         next.warnings = [...(data.warnings ?? []), ...next.warnings];
@@ -311,11 +321,11 @@ export function Editor() {
             <label className="flex items-center gap-1 text-[11px] text-[#9c968a]">
               PDF
               <Input
-                aria-label={tr(locale, "PDF 页码", "PDF page")}
-                type="number"
-                min={1}
+                aria-label={tr(locale, "PDF 页码，留空表示全部", "PDF page, empty for all")}
+                inputMode="numeric"
+                placeholder={tr(locale, "全部", "all")}
                 value={pdfPage}
-                onChange={(event) => setPdfPage(Math.max(1, Number(event.target.value) || 1))}
+                onChange={(event) => setPdfPage(event.target.value.replace(/[^\d]/g, ""))}
                 className="h-8 w-14"
               />
             </label>
@@ -498,7 +508,7 @@ export function Editor() {
                 <SelectValue placeholder={tr(locale, `移动 ${selection.length} 个音符`, `Move ${selection.length}`)} />
               </SelectTrigger>
               <SelectContent>
-                {ROLE_ORDER.map((role) => (
+                {ALL_ROLES.map((role) => (
                   <SelectItem key={role} value={role}>
                     {locale === "zh" ? ROLE_META[role].nameZh : ROLE_META[role].name}
                   </SelectItem>

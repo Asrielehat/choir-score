@@ -49,7 +49,7 @@ npm run lint
 
 ## 光学乐谱识别 OMR
 
-上传 PDF、PNG 或 JPG，或点「识别缩谱 / 识别开大谱」。`POST /api/omr` 用 [Audiveris 5.11](https://github.com/Audiveris/audiveris) 把这一页转成 MusicXML，再按合唱总谱拆轨。PDF 用页眉旁的页码，只认那一页。
+上传 PDF、PNG 或 JPG，或点「识别缩谱 / 识别开大谱」。`POST /api/omr` 用 [Audiveris 5.11](https://github.com/Audiveris/audiveris) 把每一页转成 MusicXML，再接到同一条时间线上。PDF 页码留空就认全部页（最多 16 页）；填了数字就只认那一页。声部按谱号、八度记号和上下位置对齐，某一页少了一行谱也不会把后面的声部挤错位。大提琴单独成轨，钢琴仍是右手 / 左手。页末多出来的空小节会去掉。谱面没有速度、但页眉能读出 `♩ = 80` 这类记号时，用那个速度。
 
 选 Audiveris 是因为它按系统保留多行谱表。`oemer` 和 `homr` 更轻，但会把 SATB 多行谱收成一个声部。没有找到可直接安装的 `satb-line-omr`。要换引擎时设置 `OMR_COMMAND`（不要设成单词 `audiveris`，那会走内置安装）和逗号分隔的 `OMR_ARGS`，占位符是 `{input}` 和 `{outdir}`。
 
@@ -76,7 +76,8 @@ Audiveris 的文字识别走 Tesseract 的 legacy 引擎。发行版自带的 `e
 
 - 音色是合成钢琴（泛音加琴槌噪声），不是采样三角钢琴。所有声部共用这一种音色。
 - 播放中改音符，要再按一次播放才会听到新的。静音、独奏和音量是即时的。
-- MusicXML 的音高按实音读。谱号上的八度记号（男高音高音谱号低八度）只影响显示，不再移调。移调乐器的 `<transpose>` 会加上。
+- MusicXML 的音高按实音读。谱号上的八度记号（男高音高音谱号低八度）只影响显示，不再移调。某个声部的中位音高出或低出常用音区六度以上时，按整八度拉回，并在警告里说明。移调乐器的 `<transpose>` 会加上。
+- 中文歌词需要中文的 Tesseract 数据；只有英文包时，歌词多半是空的。斜向水印如果被认成音符，不会按某一首曲子单独过滤。
 - 极短的倚音、提示音（cue）会跳过。连音线会收成一个长音。
 - MIDI 最好是「一个声部一条轨」，并用轨名标明 Soprano / Alto / Tenor / Bass / Piano。单轨里塞进全部 SATB 时，只能当成一条旋律或钢琴，不会自动猜出四个声部。
 - `score-timewise` 能读，但主流导出仍是 `score-partwise`。

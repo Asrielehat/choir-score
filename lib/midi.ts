@@ -1,6 +1,6 @@
 import type { RawNote, RawScore } from "./musicxml/parse";
 import { buildMeasures } from "./timing";
-import { ROLE_META, ROLE_ORDER, type NoteEvent, type Role, type ScoreProject } from "./types";
+import { OPTIONAL_ROLES, ROLE_META, ROLE_ORDER, type NoteEvent, type Role, type ScoreProject } from "./types";
 
 const PPQ_OUT = 480;
 
@@ -312,7 +312,7 @@ export function exportMidi(project: ScoreProject): Uint8Array {
   tempoEvents.push({ tick: endTick, order: 9, data: [0xff, 0x2f, 0x00] });
 
   const tracks = [trackFromEvents(tempoEvents)];
-  ROLE_ORDER.forEach((role, index) => {
+  [...ROLE_ORDER, ...OPTIONAL_ROLES].forEach((role, index) => {
     const notes = project.notes
       .filter((note) => note.trackId === role)
       .slice()

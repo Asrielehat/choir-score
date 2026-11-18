@@ -6,7 +6,7 @@ import { Dialog, DialogContent } from "@/components/ui/dialog";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { useEditor, type Locale } from "@/lib/store";
 import { pitchRangeLabel } from "@/lib/pitch";
-import { ROLE_META, ROLE_ORDER, type Role } from "@/lib/types";
+import { ALL_ROLES, ROLE_META, type Role } from "@/lib/types";
 import type { OmrStatus } from "@/lib/omr";
 
 function tr(locale: Locale, zh: string, en: string) {
@@ -93,7 +93,7 @@ function AssignBody({
                           <SelectValue />
                         </SelectTrigger>
                         <SelectContent>
-                          {ROLE_ORDER.map((role) => (
+                          {ALL_ROLES.map((role) => (
                             <SelectItem key={role} value={role}>
                               {locale === "zh" ? ROLE_META[role].nameZh : ROLE_META[role].name}
                             </SelectItem>
