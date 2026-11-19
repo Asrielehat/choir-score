@@ -67,6 +67,29 @@ curl -L -o /opt/audiveris/tessdata/eng.traineddata \
 
 Audiveris 的文字识别走 Tesseract 的 legacy 引擎。发行版自带的 `eng` 数据往往只有 LSTM，歌词会是空的，所以上面要另下一份 `tessdata`。中文歌词再加一份 `chi_sim.traineddata`（同一个 tessdata 仓库）；文件在时，接口会让 Audiveris 用 `chi_sim+eng`。接口在 `/opt/audiveris/bin/Audiveris` 存在时就会用它。扫描页先栅格化成 300 DPI PNG。400 DPI 在最密的一页上少了一些时值错误，但会漏掉升降号、也会少音符，所以仍用 300 DPI，时值错误交给后面的小节修复。识别结果旁边可以对照缩小后的原页。
 
+Windows 上不用管理员权限，全部装在用户目录：
+
+```powershell
+# 1. Audiveris 5.11 命令行版。用 MSI 的“管理安装”解包，不写注册表、不进 Program Files。
+curl.exe -L -o "$env:TEMP\audiveris-console.msi" `
+  https://github.com/Audiveris/audiveris/releases/download/5.11.0/Audiveris-5.11.0-windowsConsole-x86_64.msi
+msiexec /a "$env:TEMP\audiveris-console.msi" /qn TARGETDIR="$env:LOCALAPPDATA\audiveris"
+
+# 2. poppler（pdfinfo / pdftoppm）：把 zip 解压到这个目录。
+curl.exe -L -o "$env:TEMP\poppler.zip" `
+  https://github.com/oschwartz10612/poppler-windows/releases/download/v26.09.0-0/Release-26.09.0-0.zip
+Expand-Archive "$env:TEMP\poppler.zip" -DestinationPath "$env:LOCALAPPDATA\poppler" -Force
+
+# 3. 文字识别数据：歌词靠它，中文另加 chi_sim。
+New-Item -ItemType Directory -Force "$env:LOCALAPPDATA\audiveris\tessdata" | Out-Null
+foreach ($lang in @("eng", "chi_sim")) {
+  curl.exe -L -o "$env:LOCALAPPDATA\audiveris\tessdata\$lang.traineddata" `
+    "https://github.com/tesseract-ocr/tessdata/raw/main/$lang.traineddata"
+}
+```
+
+接口会自己找 `%LOCALAPPDATA%\audiveris\Audiveris\Audiveris.exe`、`%LOCALAPPDATA%\poppler\*\Library\bin` 和 `%LOCALAPPDATA%\audiveris\tessdata`，不用改 `PATH`，也不用重开终端。Windows 包已经带了 Java 运行时和 Tesseract 原生库，所以系统里的 Java 8 不影响识别，歌词也能读出来。装在别处就在 `.env.local` 里设 `OMR_COMMAND` 指向 `Audiveris.exe` 的完整路径。唯一缺的是页眉速度记号：那一步要调用系统的 `tesseract` 命令，没装就跳过，速度用默认值，其余照常。
+
 小节若比拍号长，不会删掉越过小节线的音符。会先试这些改法：照同一小节里已经对齐的声部改时值、把一串被认长一倍的音符缩短、去掉多出来的附点或休止、把三个等长音符当三连音、拿掉一个离前后音很远的音。都不合适时，全部音符按比例压进拍号，并在警告里标出这一小节。连线只在同音、紧挨着、歌词不是两个不同的字时合并；占满整小节又接到下一小节的长音，多半是圆滑线，不再并成一个超长音。
 
 两份测试谱在 `public/samples/omr/`：
