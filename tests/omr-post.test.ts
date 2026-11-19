@@ -16,7 +16,51 @@ function singlePart(id: string, midi: number, clef: string, options?: { octave?:
   </measure></part>`;
 }
 
+/** Audiveris exports a closed score as one single-staff part per printed staff, both named "Voice". */
+function closedStaffPart(id: string, clef: string, upperMidi: number, lowerMidi: number): string {
+  const line = clef === "F" ? 4 : 2;
+  return `<part id="${id}"><measure number="1">
+    <attributes><divisions>1</divisions><time><beats>4</beats><beat-type>4</beat-type></time>
+      <clef><sign>${clef}</sign><line>${line}</line></clef>
+    </attributes>
+    ${note({ midi: upperMidi, duration: 2, voice: 1, stem: "up", lyric: "光" })}
+    ${note({ midi: 62, duration: 1 })}
+    <backup><duration>4</duration></backup>
+    ${note({ midi: lowerMidi, duration: 4, voice: 2, stem: "down", lyric: "光" })}
+  </measure></part>`;
+}
+
 describe("OMR post-processing", () => {
+  it("splits a closed score that arrives as two unnamed single-staff parts", () => {
+    const xml = partwise(
+      [scorePart("P1", "Voice"), scorePart("P2", "Voice")].join(""),
+      [closedStaffPart("P1", "G", 72, 64), closedStaffPart("P2", "F", 55, 48)].join(""),
+    );
+    const project = projectFromMusicXml(xml, { fromOmr: true });
+    const trackOf = (midi: number) => project.notes.filter((item) => item.midi === midi).map((item) => item.trackId).sort();
+    expect(trackOf(72)).toEqual(["soprano"]);
+    expect(trackOf(64)).toEqual(["alto"]);
+    expect(trackOf(55)).toEqual(["tenor"]);
+    expect(trackOf(48)).toEqual(["bass"]);
+  });
+
+  it("still keeps four open-score parts one voice each", () => {
+    const xml = partwise(
+      ["P1", "P2", "P3", "P4"].map((id) => scorePart(id, "Voice")).join(""),
+      [
+        singlePart("P1", 72, "G", { lyric: "光" }),
+        singlePart("P2", 67, "G", { lyric: "光" }),
+        singlePart("P3", 60, "G", { lyric: "光" }),
+        singlePart("P4", 48, "F", { lyric: "光" }),
+      ].join(""),
+    );
+    const project = projectFromMusicXml(xml, { fromOmr: true });
+    expect(project.notes.find((item) => item.midi === 72)?.trackId).toBe("soprano");
+    expect(project.notes.find((item) => item.midi === 67)?.trackId).toBe("alto");
+    expect(project.notes.find((item) => item.midi === 60)?.trackId).toBe("tenor");
+    expect(project.notes.find((item) => item.midi === 48)?.trackId).toBe("bass");
+  });
+
   it("trims an over-full measure back to the barline and does not shift the next bar", () => {
     const quarters = [72, 74, 76, 77, 79].map((midi) => note({ midi, duration: 1 })).join("");
     const xml = partwise(

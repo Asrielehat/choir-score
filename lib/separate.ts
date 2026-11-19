@@ -251,7 +251,8 @@ function applyChoirPartOrder(parts: RawPart[], labels: NameKind[], counts: numbe
     const vocal = feats.slice(0, -2);
     const vocalLyrics = vocal.reduce((sum, feature) => sum + feature.lyricCount, 0);
     const pianoLyrics = right.lyricCount + left.lyricCount;
-    const leftIsBass = left.clef === "F" || (!left.clef && left.median + 3 < right.median);
+    // A staff whose clef the scan lost is usually the piano left hand, not another voice.
+    const leftIsBass = left.clef === "F" || !left.clef;
     if (leftIsBass && right.clef !== "F" && pianoLyrics <= Math.max(1, vocalLyrics * 0.35)) {
       labels[right.index] = "piano-rh";
       labels[left.index] = "piano-lh";
@@ -314,6 +315,36 @@ function planStaves(parts: RawPart[], options: SeparateOptions = {}): StaffPlan[
     else if (counts[i] >= 4) labels[i] = "choir";
   });
 
+  // Two single-staff parts that each carry two voices are a closed score, not two voices.
+  // Decide that before the choir layout labels them soprano/bass, or the split never happens.
+  const namedLabels = labels.slice();
+  const forceShared = new Map<number, { upper: Role; lower: Role; reasonZh: string; reasonEn: string }>();
+  const polyphonic = parts
+    .map((part, i) => ({ part, i }))
+    .filter(
+      ({ part, i }) =>
+        counts[i] === 1 &&
+        !isSpecificVoice(namedLabels[i]) &&
+        namedLabels[i] !== "piano" &&
+        namedLabels[i] !== "cello" &&
+        splitEvidence(part.notes),
+    );
+  if (polyphonic.length === 2 && !namedLabels.includes("choir")) {
+    const ranked = polyphonic.slice().sort((a, b) => median(b.part.notes) - median(a.part.notes));
+    forceShared.set(ranked[0].i, {
+      upper: "soprano",
+      lower: "alto",
+      reasonZh: "两个复调声部中音区更高的一组",
+      reasonEn: "Higher of two polyphonic vocal parts",
+    });
+    forceShared.set(ranked[1].i, {
+      upper: "tenor",
+      lower: "bass",
+      reasonZh: "两个复调声部中音区更低的一组",
+      reasonEn: "Lower of two polyphonic vocal parts",
+    });
+  }
+
   if (options.choirLayout) applyChoirPartOrder(parts, labels, counts);
 
   const unknownSingles = labels
@@ -327,33 +358,6 @@ function planStaves(parts: RawPart[], options: SeparateOptions = {}): StaffPlan[
     const roles: Role[] = ["soprano", "alto", "tenor", "bass"];
     ranked.forEach((item, index) => {
       labels[item.i] = roles[index];
-    });
-  }
-
-  const forceShared = new Map<number, { upper: Role; lower: Role; reasonZh: string; reasonEn: string }>();
-  const polyphonic = parts
-    .map((part, i) => ({ part, i }))
-    .filter(
-      ({ part, i }) =>
-        counts[i] === 1 &&
-        !isSpecificVoice(labels[i]) &&
-        labels[i] !== "piano" &&
-        labels[i] !== "cello" &&
-        splitEvidence(part.notes),
-    );
-  if (polyphonic.length === 2 && !labels.includes("choir")) {
-    const ranked = polyphonic.slice().sort((a, b) => median(b.part.notes) - median(a.part.notes));
-    forceShared.set(ranked[0].i, {
-      upper: "soprano",
-      lower: "alto",
-      reasonZh: "两个复调声部中音区更高的一组",
-      reasonEn: "Higher of two polyphonic vocal parts",
-    });
-    forceShared.set(ranked[1].i, {
-      upper: "tenor",
-      lower: "bass",
-      reasonZh: "两个复调声部中音区更低的一组",
-      reasonEn: "Lower of two polyphonic vocal parts",
     });
   }
 
