@@ -34,6 +34,11 @@ export interface NoteHit {
   edge: "left" | "right" | "body";
 }
 
+/**
+ * `allowed` is the set of audible track ids. A note on a muted (or non-soloed) track is
+ * drawn faded and must not be hit, otherwise two overlapping notes in different parts
+ * fight over the click.
+ */
 export function hitTestNote(
   x: number,
   y: number,
@@ -43,10 +48,12 @@ export function hitTestNote(
   zoomY: number,
   scrollX: number,
   scrollY: number,
+  allowed?: Set<string>,
 ): NoteHit | null {
   const midi = yToMidi(y, zoomY, scrollY);
   const beat = xToBeat(x, zoomX, scrollX);
   const ordered = notes
+    .filter((note) => !allowed || allowed.has(note.trackId))
     .map((note, index) => ({ note, index }))
     .sort((a, b) => {
       const as = selection.has(a.note.id) ? 1 : 0;

@@ -15,6 +15,7 @@ export function TrackList() {
   const project = useEditor((s) => s.project);
   const locale = useEditor((s) => s.locale);
   const selection = useEditor((s) => s.selection);
+  const activeTrack = useEditor((s) => s.activeTrack);
   if (!project) return null;
 
   return (
@@ -24,12 +25,14 @@ export function TrackList() {
         const notes = project.notes.filter((note) => note.trackId === track.id);
         const audible = isAudible(track, project.tracks);
         const selectedHere = notes.length > 0 && notes.every((note) => selection.includes(note.id));
+        const active = activeTrack === track.role;
         return (
           <section
             key={track.id}
             className={cn(
               "min-w-[220px] rounded-lg border bg-[#141821] p-2.5 md:min-w-0",
               audible ? "border-[#2e3342]" : "border-[#2e3342] opacity-60",
+              active && "border-[#d7a15e]/70",
               selectedHere && "ring-1 ring-[#d7a15e]",
             )}
           >
@@ -37,12 +40,22 @@ export function TrackList() {
               type="button"
               className="flex w-full items-center gap-2 text-left"
               onClick={(event) => useEditor.getState().selectTrack(track.id, event.shiftKey)}
+              title={
+                audible
+                  ? tr(locale, "点这个声部，之后双击卷帘就画在它上面", "Make this the track new notes are drawn into")
+                  : tr(locale, "静音轨不参与选择，先取消静音才能改", "A muted track cannot be selected; unmute it first")
+              }
             >
               <span className="h-8 w-1.5 rounded-full" style={{ background: track.color }} />
               <span className="min-w-0 flex-1">
                 <span className="block truncate text-sm font-medium">
                   {locale === "zh" ? meta.nameZh : meta.name}
                   <span className="ml-1.5 text-xs text-[#9c968a]">{locale === "zh" ? meta.name : meta.nameZh}</span>
+                  {active ? (
+                    <span className="ml-1.5 rounded bg-[#d7a15e]/20 px-1 text-[9px] tracking-wide text-[#f0d7a8]">
+                      {tr(locale, "当前", "active")}
+                    </span>
+                  ) : null}
                 </span>
                 <span className="block text-[11px] text-[#9c968a]">
                   {notes.length
@@ -85,6 +98,11 @@ export function TrackList() {
                 onValueChange={([value]) => useEditor.getState().setVolume(track.id, value / 100)}
               />
             </div>
+            {audible ? null : (
+              <p className="mt-1.5 text-[10px] leading-4 text-[#8d877c]">
+                {tr(locale, "静音中：卷帘上的音块不可选中", "Muted: its notes cannot be selected")}
+              </p>
+            )}
           </section>
         );
       })}

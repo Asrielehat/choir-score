@@ -4,8 +4,8 @@ import { useEffect, useRef, useState } from "react";
 import { engine } from "@/lib/audio";
 import { midiName, pitchRangeLabel } from "@/lib/pitch";
 import { useEditor } from "@/lib/store";
-import { isAudible } from "@/lib/tracks";
-import { projectEndBeat, snapBeat } from "@/lib/timing";
+import { audibleTrackIds } from "@/lib/tracks";
+import { rollLength, snapBeat } from "@/lib/timing";
 import { ROLE_META, type NoteEvent } from "@/lib/types";
 import { drawRoll } from "./drawRoll";
 import {
@@ -52,9 +52,7 @@ export function PianoRoll() {
   const hoverRef = useRef<{ x: number; y: number; text: string } | null>(null);
   const fitted = useRef("");
 
-  const projectKey = useEditor((s) =>
-    s.project ? `${s.project.title}|${s.project.sourceName ?? ""}|${s.project.notes.length}` : "",
-  );
+  const loadToken = useEditor((s) => s.loadToken);
 
   const draw = () => {
     const canvas = canvasRef.current;
@@ -68,7 +66,7 @@ export function PianoRoll() {
     const state = useEditor.getState();
     const notes = previewRef.current ?? project.notes;
     const selection = new Set(boxSelRef.current ?? state.selection);
-    const audible = new Set(project.tracks.filter((track) => isAudible(track, project.tracks)).map((track) => track.id));
+    const audible = audibleTrackIds(project);
     const drag = dragRef.current;
     drawRoll(ctx, w, h, {
       project,
@@ -81,6 +79,7 @@ export function PianoRoll() {
       scrollX: state.scrollX,
       scrollY: state.scrollY,
       locale: state.locale,
+      grid: state.snapBeats > 0 ? state.snapBeats : 0.25,
       box: drag && drag.kind === "box" ? drag : null,
       hover: hoverRef.current,
     });
@@ -145,14 +144,14 @@ export function PianoRoll() {
   }, []);
 
   useEffect(() => {
-    if (!projectKey) return;
-    if (fitted.current === projectKey) return;
-    fitted.current = projectKey;
+    if (!loadToken) return;
+    if (fitted.current === String(loadToken)) return;
+    fitted.current = String(loadToken);
     const id = requestAnimationFrame(() => {
       const project = useEditor.getState().project;
       const { w, h } = sizeRef.current;
       if (!project || w < 80) return;
-      const end = projectEndBeat(project);
+      const end = rollLength(project);
       const span = Math.max(8, Math.min(end, 16));
       const zoomX = Math.min(120, Math.max(36, (w - KEY_W - 32) / span));
       const midis = project.notes.map((note) => note.midi);
@@ -165,7 +164,7 @@ export function PianoRoll() {
       draw();
     });
     return () => cancelAnimationFrame(id);
-  }, [projectKey]);
+  }, [loadToken]);
 
   useEffect(() => {
     const wrap = wrapRef.current;
@@ -200,7 +199,7 @@ export function PianoRoll() {
     return () => wrap.removeEventListener("wheel", onWheel);
   }, []);
 
-  const pointerPos = (event: React.PointerEvent) => {
+  const pointerPos = (event: { clientX: number; clientY: number }) => {
     const rect = wrapRef.current!.getBoundingClientRect();
     return { x: event.clientX - rect.left, y: event.clientY - rect.top };
   };
@@ -210,7 +209,12 @@ export function PianoRoll() {
     if (!project) return;
     wrapRef.current?.focus();
     const { x, y } = pointerPos(event);
-    event.currentTarget.setPointerCapture(event.pointerId);
+    // Synthetic or already-released pointers make this throw; the drag still works without capture.
+    try {
+      event.currentTarget.setPointerCapture(event.pointerId);
+    } catch {
+      /* pointer is not active */
+    }
     const state = useEditor.getState();
     if (y <= RULER_H && x >= KEY_W) {
       const beat = Math.max(0, xToBeat(x, state.zoomX, state.scrollX));
@@ -221,6 +225,7 @@ export function PianoRoll() {
     }
     if (x < KEY_W) return;
     const notes = project.notes;
+    const audible = audibleTrackIds(project);
     const hit = hitTestNote(
       x,
       y,
@@ -230,8 +235,11 @@ export function PianoRoll() {
       state.zoomY,
       state.scrollX,
       state.scrollY,
+      audible,
     );
     if (hit) {
+      const track = project.tracks.find((item) => item.id === notes.find((note) => note.id === hit.id)?.trackId);
+      if (track) state.setActiveTrack(track.role);
       let ids = state.selection;
       if (event.shiftKey) {
         ids = ids.includes(hit.id) ? ids.filter((id) => id !== hit.id) : [...ids, hit.id];
@@ -285,6 +293,7 @@ export function PianoRoll() {
         state.zoomY,
         state.scrollX,
         state.scrollY,
+        audibleTrackIds(project),
       );
       const canvas = canvasRef.current;
       if (canvas) {
@@ -318,8 +327,16 @@ export function PianoRoll() {
       const b1 = xToBeat(Math.max(drag.x0, x), state.zoomX, state.scrollX);
       const m0 = Math.min(yToMidi(drag.y0, state.zoomY, state.scrollY), yToMidi(y, state.zoomY, state.scrollY));
       const m1 = Math.max(yToMidi(drag.y0, state.zoomY, state.scrollY), yToMidi(y, state.zoomY, state.scrollY));
+      const audible = audibleTrackIds(project);
       const hitIds = project.notes
-        .filter((note) => note.startBeat < b1 && note.startBeat + note.durationBeats > b0 && note.midi >= m0 && note.midi <= m1)
+        .filter(
+          (note) =>
+            audible.has(note.trackId) &&
+            note.startBeat < b1 &&
+            note.startBeat + note.durationBeats > b0 &&
+            note.midi >= m0 &&
+            note.midi <= m1,
+        )
         .map((note) => note.id);
       boxSelRef.current = [...new Set([...drag.base, ...hitIds])];
       draw();
@@ -382,13 +399,71 @@ export function PianoRoll() {
     draw();
   };
 
+  /** Double-click empty space to draw a note into the active track. */
+  const onDoubleClick = (event: React.MouseEvent<HTMLCanvasElement>) => {
+    const state = useEditor.getState();
+    const project = state.project;
+    if (!project) return;
+    const { x, y } = pointerPos(event);
+    if (x < KEY_W || y <= RULER_H) return;
+    const audible = audibleTrackIds(project);
+    const hit = hitTestNote(
+      x,
+      y,
+      project.notes,
+      new Set(state.selection),
+      state.zoomX,
+      state.zoomY,
+      state.scrollX,
+      state.scrollY,
+      audible,
+    );
+    if (hit) return;
+    const raw = xToBeat(x, state.zoomX, state.scrollX);
+    const step = state.snap && state.snapBeats > 0 ? state.snapBeats : 1;
+    const startBeat = state.snap ? snapBeat(raw, step, true) : Math.max(0, raw);
+    state.addNote({
+      trackId: state.activeTrack,
+      midi: yToMidi(y, state.zoomY, state.scrollY),
+      startBeat,
+      durationBeats: state.snap ? step : 0.5,
+    });
+    dragRef.current = null;
+    draw();
+  };
+
+  /** Right-click a note to remove it. Muted tracks are ignored, same as selection. */
+  const onContextMenu = (event: React.MouseEvent<HTMLCanvasElement>) => {
+    const state = useEditor.getState();
+    const project = state.project;
+    if (!project) return;
+    const { x, y } = pointerPos(event);
+    if (x < KEY_W || y <= RULER_H) return;
+    event.preventDefault();
+    const hit = hitTestNote(
+      x,
+      y,
+      project.notes,
+      new Set(state.selection),
+      state.zoomX,
+      state.zoomY,
+      state.scrollX,
+      state.scrollY,
+      audibleTrackIds(project),
+    );
+    if (!hit) return;
+    state.setSelection([]);
+    state.deleteNotes([hit.id]);
+    draw();
+  };
+
   const project = useEditor((s) => s.project);
   const locale = useEditor((s) => s.locale);
   const zoomX = useEditor((s) => s.zoomX);
   const scrollX = useEditor((s) => s.scrollX);
   const zoomY = useEditor((s) => s.zoomY);
   const scrollY = useEditor((s) => s.scrollY);
-  const end = project ? projectEndBeat(project) + 2 : 16;
+  const end = project ? rollLength(project) : 16;
   const viewW = Math.max(1, size.w - KEY_W);
   const contentW = end * zoomX;
   const maxX = Math.max(0, contentW - viewW);
@@ -409,6 +484,8 @@ export function PianoRoll() {
         onPointerMove={onPointerMove}
         onPointerUp={onPointerUp}
         onPointerCancel={onPointerUp}
+        onDoubleClick={onDoubleClick}
+        onContextMenu={onContextMenu}
         onPointerLeave={() => {
           if (!dragRef.current) {
             hoverRef.current = null;
@@ -463,7 +540,7 @@ export function PianoRoll() {
       </div>
       {project && project.notes.length === 0 ? (
         <div className="pointer-events-none absolute inset-0 grid place-items-center text-sm text-[#9c968a]">
-          {locale === "zh" ? "这条时间线上还没有音符" : "No notes on the timeline"}
+          {locale === "zh" ? "双击空白处添加音块" : "Double-click to add a note"}
         </div>
       ) : null}
       <span className="sr-only">{project ? pitchRangeLabel(project.notes.map((note) => note.midi)) : ""}</span>

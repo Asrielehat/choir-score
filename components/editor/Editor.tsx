@@ -4,6 +4,7 @@ import {
   CircleHelp,
   Download,
   FolderOpen,
+  Home,
   Languages,
   Pause,
   Play,
@@ -15,8 +16,10 @@ import {
   ZoomIn,
   ZoomOut,
 } from "lucide-react";
+import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
+import { BusyOverlay } from "@/components/ui/busy-overlay";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -24,10 +27,10 @@ import { Slider } from "@/components/ui/slider";
 import { Switch } from "@/components/ui/switch";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { engine } from "@/lib/audio";
-import type { OmrStatus } from "@/lib/omr";
-import { importScoreBytes, projectFromMusicXml, projectFromOmrPages, serializeProject, STORAGE_KEY, deserializeProject, toMidi, toMusicXml } from "@/lib/project";
-import { persistSoon, useEditor, type Locale } from "@/lib/store";
-import { locateBeat, projectEndBeat } from "@/lib/timing";
+import { ACCEPT, importScoreFile, loadSampleProject } from "@/lib/importer";
+import { STORAGE_KEY, deserializeProject, serializeProject, toMidi, toMusicXml } from "@/lib/project";
+import { hydrateLocale, persistSoon, useEditor, type Locale } from "@/lib/store";
+import { rollLength } from "@/lib/timing";
 import { ALL_ROLES, ROLE_META, type Role } from "@/lib/types";
 import { downloadBlob, safeFileStem } from "@/lib/utils";
 import { AssignDialog, HelpDialog, OmrDialog } from "./Dialogs";
@@ -39,10 +42,12 @@ function tr(locale: Locale, zh: string, en: string) {
 }
 
 export function Editor() {
+  const router = useRouter();
   const project = useEditor((s) => s.project);
   const locale = useEditor((s) => s.locale);
   const error = useEditor((s) => s.error);
   const busy = useEditor((s) => s.busy);
+  const omrStatus = useEditor((s) => s.omrStatus);
   const selection = useEditor((s) => s.selection);
   const snap = useEditor((s) => s.snap);
   const snapBeats = useEditor((s) => s.snapBeats);
@@ -54,16 +59,17 @@ export function Editor() {
   const [dragging, setDragging] = useState(false);
   const [assignOpen, setAssignOpen] = useState(false);
   const [helpOpen, setHelpOpen] = useState(false);
-  const [omrOpen, setOmrOpen] = useState(false);
-  const [omrStatus, setOmrStatus] = useState<OmrStatus | null>(null);
   const [pdfPage, setPdfPage] = useState("");
-  const [busyLabel, setBusyLabel] = useState("");
-  const [elapsed, setElapsed] = useState(0);
   const [showPage, setShowPage] = useState(true);
 
   useEffect(() => {
-    const storedLocale = localStorage.getItem("choir-roll.locale");
-    if (storedLocale === "zh" || storedLocale === "en") useEditor.getState().setLocale(storedLocale);
+    hydrateLocale();
+    const state = useEditor.getState();
+    if (state.project) {
+      // Arrived from the home screen with a project already open.
+      persistSoon(state.project);
+      return;
+    }
     const saved = localStorage.getItem(STORAGE_KEY);
     if (saved) {
       try {
@@ -73,7 +79,7 @@ export function Editor() {
         localStorage.removeItem(STORAGE_KEY);
       }
     }
-    void loadSample();
+    void loadSampleProject();
   }, []);
 
   useEffect(() => engine.on((beat, playing) => useEditor.getState().markTransport(beat, playing)), []);
@@ -107,6 +113,7 @@ export function Editor() {
         state.redo();
       } else if ((event.metaKey || event.ctrlKey) && key === "a" && state.project) {
         event.preventDefault();
+        // Only audible notes can be selected, so a muted part never comes along.
         state.setSelection(state.project.notes.map((note) => note.id));
       } else if (event.key === "Delete" || event.key === "Backspace") {
         event.preventDefault();
@@ -142,7 +149,7 @@ export function Editor() {
       event.preventDefault();
       setDragging(false);
       const file = event.dataTransfer?.files?.[0];
-      if (file) void openFile(file);
+      if (file) void importScoreFile(file, pdfPage);
     };
     const leave = () => setDragging(false);
     window.addEventListener("dragover", over);
@@ -153,97 +160,8 @@ export function Editor() {
       window.removeEventListener("drop", drop);
       window.removeEventListener("dragleave", leave);
     };
-    // openFile is recreated each render and only needs the initial listener.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  async function loadSample() {
-    useEditor.getState().setBusy(true);
-    try {
-      const response = await fetch("/samples/chen-guang.musicxml");
-      if (!response.ok) throw new Error(tr(useEditor.getState().locale, "示例谱没有找到", "Sample score missing"));
-      const next = projectFromMusicXml(await response.text());
-      next.sourceName = "chen-guang.musicxml";
-      useEditor.getState().setProject(next);
-    } catch (caught) {
-      useEditor.getState().setError(caught instanceof Error ? caught.message : String(caught));
-    } finally {
-      useEditor.getState().setBusy(false);
-    }
-  }
-
-  async function recognize(file: File, page: string | number = pdfPage) {
-    useEditor.getState().setBusy(true);
-    useEditor.getState().setError(null);
-    const everyPage = page === "" || page === "all" || page === 0;
-    setBusyLabel(
-      tr(
-        useEditor.getState().locale,
-        everyPage ? "Audiveris 正在逐页读谱，多页会接成一条时间线" : "Audiveris 正在读这一页，通常要一分钟左右",
-        everyPage ? "Audiveris is reading every page onto one timeline" : "Audiveris is reading this page, usually about a minute",
-      ),
-    );
-    setElapsed(0);
-    const started = Date.now();
-    const timer = window.setInterval(() => setElapsed(Math.round((Date.now() - started) / 1000)), 500);
-    try {
-      const body = new FormData();
-      body.set("file", file);
-      body.set("page", everyPage ? "all" : String(page));
-      const response = await fetch("/api/omr", { method: "POST", body });
-      const data = (await response.json()) as OmrStatus & {
-        ok?: boolean;
-        musicxml?: string;
-        musicxmls?: string[];
-        metronome?: number | null;
-        warnings?: string[];
-        pages?: { label: string; href: string }[];
-      };
-      const xmls = data.musicxmls?.length ? data.musicxmls : data.musicxml ? [data.musicxml] : [];
-      if (data.ok && xmls.length) {
-        const next = projectFromOmrPages(xmls, { bpm: data.metronome ?? null });
-        next.sourceName = file.name;
-        next.pages = data.pages ?? [];
-        next.warnings = [...(data.warnings ?? []), ...next.warnings];
-        useEditor.getState().setProject(next);
-        setShowPage(true);
-      } else {
-        setOmrStatus(data);
-        setOmrOpen(true);
-      }
-    } catch (caught) {
-      useEditor.getState().setError(caught instanceof Error ? caught.message : String(caught));
-    } finally {
-      window.clearInterval(timer);
-      useEditor.getState().setBusy(false);
-      setBusyLabel("");
-    }
-  }
-
-  async function recognizeSample(url: string, name: string) {
-    const response = await fetch(url);
-    if (!response.ok) throw new Error(name);
-    const blob = await response.blob();
-    await recognize(new File([blob], name, { type: blob.type || "image/png" }), 1);
-  }
-
-  async function openFile(file: File) {
-    useEditor.getState().setBusy(true);
-    useEditor.getState().setError(null);
-    try {
-      if (/\.(pdf|png|jpe?g|tif|tiff)$/i.test(file.name)) {
-        useEditor.getState().setBusy(false);
-        await recognize(file);
-        return;
-      }
-      const bytes = new Uint8Array(await file.arrayBuffer());
-      useEditor.getState().setProject(importScoreBytes(file.name, bytes));
-    } catch (caught) {
-      useEditor.getState().setError(caught instanceof Error ? caught.message : String(caught));
-    } finally {
-      useEditor.getState().setBusy(false);
-    }
-  }
+    // importScoreFile is a module function; pdfPage only refines which page gets read.
+  }, [pdfPage]);
 
   async function play(selectionOnly: boolean) {
     const state = useEditor.getState();
@@ -279,6 +197,14 @@ export function Editor() {
     <TooltipProvider delayDuration={400}>
       <div className="flex h-dvh flex-col bg-[#10131a] text-[#f3efe6]">
         <header className="flex flex-wrap items-center gap-2 border-b border-[#2a2f3c] px-3 py-2">
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button variant="ghost" size="icon" aria-label={tr(locale, "返回首页", "Home")} onClick={() => router.push("/")}>
+                <Home className="h-4 w-4" />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>{tr(locale, "首页", "Home")}</TooltipContent>
+          </Tooltip>
           <div className="mr-1 flex items-center gap-2">
             <Mark />
             <div className="leading-tight">
@@ -295,28 +221,16 @@ export function Editor() {
             onChange={(event) => useEditor.getState().setTitle(event.target.value)}
           />
           <div className="ml-auto flex flex-wrap items-center gap-1.5">
-            <Button variant="muted" size="sm" onClick={() => void loadSample()} disabled={busy}>
+            <Button variant="muted" size="sm" onClick={() => void loadSampleProject()} disabled={busy}>
               {tr(locale, "示例「晨光」", "Sample")}
             </Button>
             <Button
               variant="default"
               size="sm"
               disabled={busy}
-              onClick={() => void recognizeSample("/samples/omr/abide-with-me.png", "abide-with-me.png").catch((error: unknown) => useEditor.getState().setError(String(error)))}
+              onClick={() => fileRef.current?.click()}
             >
-              {tr(locale, "识别缩谱", "Scan closed")}
-            </Button>
-            <Button
-              variant="default"
-              size="sm"
-              disabled={busy}
-              onClick={() =>
-                void recognizeSample("/samples/omr/gounod-daughters.png", "gounod-daughters.png").catch((error: unknown) =>
-                  useEditor.getState().setError(String(error)),
-                )
-              }
-            >
-              {tr(locale, "识别开大谱", "Scan open")}
+              {tr(locale, "识别扫描件", "Scan")}
             </Button>
             <label className="flex items-center gap-1 text-[11px] text-[#9c968a]">
               PDF
@@ -365,11 +279,11 @@ export function Editor() {
             ref={fileRef}
             type="file"
             hidden
-            accept=".musicxml,.xml,.mxl,.mid,.midi,.json,.pdf,.png,.jpg,.jpeg,.tif,.tiff"
+            accept={ACCEPT}
             onChange={(event) => {
               const file = event.target.files?.[0];
               event.target.value = "";
-              if (file) void openFile(file);
+              if (file) void importScoreFile(file, pdfPage);
             }}
           />
         </header>
@@ -426,14 +340,7 @@ export function Editor() {
                 {tr(locale, "原谱", "Page")}
               </button>
             ) : null}
-            {busy ? (
-              <div className="absolute inset-0 z-20 grid place-items-center bg-[#10131a]/80 px-6 text-center">
-                <div>
-                  <p className="text-lg">{busyLabel || tr(locale, "请稍等", "Working")}</p>
-                  <p className="mt-2 text-sm tabular-nums text-[#d7a15e]">{elapsed}s</p>
-                </div>
-              </div>
-            ) : null}
+            <BusyOverlay />
             {dragging ? (
               <div className="pointer-events-none absolute inset-3 grid place-items-center rounded-xl border-2 border-dashed border-[#d7a15e] bg-[#10131a]/80 text-sm">
                 {tr(locale, "松开即可导入 MusicXML、MXL、MIDI 或工程", "Drop MusicXML, MXL, MIDI, or a project")}
@@ -525,7 +432,7 @@ export function Editor() {
         </footer>
       </div>
       <AssignDialog open={assignOpen} onOpenChange={setAssignOpen} />
-      <OmrDialog open={omrOpen} onOpenChange={setOmrOpen} status={omrStatus} />
+      <OmrDialog open={!!omrStatus} onOpenChange={(open) => !open && useEditor.getState().setOmrStatus(null)} status={omrStatus} />
       <HelpDialog open={helpOpen} onOpenChange={setHelpOpen} />
     </TooltipProvider>
   );
@@ -545,8 +452,7 @@ function Transport({
   const playing = useEditor((s) => s.playing);
   const beat = useEditor((s) => s.displayBeat);
   const project = useEditor((s) => s.project);
-  const where = project ? locateBeat(beat, project.measures.length ? project.measures : []) : null;
-  const end = project ? projectEndBeat(project) : 0;
+  const end = project ? rollLength(project) : 0;
   return (
     <div className="flex items-center gap-1.5">
       <Button variant="default" size="icon" onClick={onPlay} aria-label={playing ? "Pause" : "Play"}>
@@ -569,10 +475,8 @@ function Transport({
         {tr(locale, `试听选区 ${selectionCount || ""}`.trim(), `Play ${selectionCount || "selection"}`)}
       </Button>
       <div className="min-w-[128px] text-xs tabular-nums text-[#c7c1b6]">
-        {where
-          ? tr(locale, `第 ${where.measure} 小节 · ${(where.beatInBar + 1).toFixed(2)} 拍`, `Bar ${where.measure} · ${(where.beatInBar + 1).toFixed(2)}`)
-          : "—"}
-        <span className="ml-2 text-[#7e7a72]">{end ? `${Math.max(0, beat).toFixed(2)}` : ""}</span>
+        {project ? tr(locale, `拍 ${Math.max(0, beat).toFixed(2)}`, `Beat ${Math.max(0, beat).toFixed(2)}`) : "—"}
+        <span className="ml-2 text-[#7e7a72]">{end ? `/ ${end.toFixed(0)}` : ""}</span>
       </div>
     </div>
   );

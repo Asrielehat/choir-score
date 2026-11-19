@@ -16,7 +16,6 @@ import {
   type Track,
   isRole,
 } from "./types";
-
 export interface MusicXmlImportOptions {
   fromOmr?: boolean;
   initialMeter?: { beats: number; beatType: number };
@@ -160,6 +159,33 @@ export function concatenateProjects(pages: ScoreProject[]): ScoreProject {
 
 export function projectFromMidi(data: Uint8Array): ScoreProject {
   return separateScore(parseMidi(data));
+}
+
+/** An empty project with the six standard tracks, so notes can be drawn straight into the roll. */
+export function blankProject(title = "未命名"): ScoreProject {
+  return {
+    title,
+    tracks: ROLE_ORDER.map((role) => makeTrack(role)),
+    notes: [],
+    streams: [],
+    tempos: [{ beat: 0, bpm: 120 }],
+    meters: [{ beat: 0, beats: 4, beatType: 4 }],
+    keys: [{ beat: 0, fifths: 0, mode: "major" }],
+    measures: [],
+    warnings: [],
+  };
+}
+
+/** Title and size of the saved project, for the home screen. */
+export function projectSummary(text: string): { title: string; notes: number; sourceName?: string } | null {
+  try {
+    const data = JSON.parse(text) as { version?: number; project?: { title?: string; notes?: unknown[]; sourceName?: string } };
+    if (data.version !== 1 || !data.project) return null;
+    const notes = Array.isArray(data.project.notes) ? data.project.notes.length : 0;
+    return { title: data.project.title || "未命名", notes, sourceName: data.project.sourceName };
+  } catch {
+    return null;
+  }
 }
 
 export function projectFromMxl(data: Uint8Array): ScoreProject {

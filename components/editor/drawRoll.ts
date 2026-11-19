@@ -1,6 +1,5 @@
-import { midiName } from "@/lib/pitch";
-import { isBlackKey } from "@/lib/pitch";
-import { ensureMeasures, locateBeat, projectEndBeat } from "@/lib/timing";
+import { isBlackKey, midiName } from "@/lib/pitch";
+import { rollLength } from "@/lib/timing";
 import type { NoteEvent, ScoreProject } from "@/lib/types";
 import { KEY_W, PITCH_MAX, PITCH_MIN, RULER_H, beatToX, rowTop, yToMidi } from "./geometry";
 
@@ -15,6 +14,8 @@ export interface DrawModel {
   scrollX: number;
   scrollY: number;
   locale: "zh" | "en";
+  /** Grid spacing in beats. The grid is always drawn; snapping only changes editing. */
+  grid: number | null;
   box: { x0: number; y0: number; x1: number; y1: number } | null;
   hover: { x: number; y: number; text: string } | null;
 }
@@ -30,8 +31,7 @@ export function drawRoll(
   ctx.fillStyle = "#12141c";
   ctx.fillRect(0, 0, width, height);
 
-  const endBeat = projectEndBeat(project);
-  const measures = ensureMeasures(project, endBeat);
+  const endBeat = rollLength(project);
   const viewBeat0 = Math.max(0, (scrollX - 2) / zoomX);
   const viewBeat1 = (scrollX + width - KEY_W + 2) / zoomX;
   const midiTop = yToMidi(RULER_H, zoomY, scrollY) + 1;
@@ -52,28 +52,31 @@ export function drawRoll(
     }
   }
 
-  for (const measure of measures) {
-    if (measure.startBeat > viewBeat1 || measure.startBeat + measure.lengthBeats < viewBeat0) continue;
-    const beatLen = 4 / measure.beatType;
-    let step = beatLen;
-    while (step > 1 / 16 && zoomX * step > 78) step /= 2;
-    const start = measure.startBeat;
-    const stop = measure.startBeat + measure.lengthBeats;
-    for (let beat = start; beat < stop - 1e-6; beat += step) {
+  // A plain beat grid on one continuous timeline: no barlines, no measure numbers,
+  // so a piece that changes meter never gets an irregular, confusing grid.
+  const grid = model.grid && model.grid > 0 ? Math.max(1 / 32, model.grid) : null;
+  if (grid && zoomX * grid >= 4) {
+    const first = Math.ceil(viewBeat0 / grid) * grid;
+    const last = Math.min(endBeat, viewBeat1);
+    // Thin out sub-beats when they get too dense to read.
+    let step = grid;
+    while (step < 1 && zoomX * step < 14) step *= 2;
+    for (let beat = Math.floor(first / step) * step; beat <= last + 1e-6; beat += step) {
+      if (beat < -1e-6) continue;
       const x = beatToX(beat, zoomX, scrollX);
-      const isBar = Math.abs(beat - start) < 1e-4;
-      const isBeat = Math.abs((beat - start) / beatLen - Math.round((beat - start) / beatLen)) < 1e-3;
+      const onBeat = Math.abs(beat - Math.round(beat)) < 1e-6;
       ctx.beginPath();
-      ctx.strokeStyle = isBar ? "rgba(224, 181, 106, 0.55)" : isBeat ? "rgba(255,255,255,0.14)" : "rgba(255,255,255,0.045)";
-      ctx.lineWidth = isBar ? 1.4 : 1;
+      ctx.strokeStyle = onBeat ? "rgba(255,255,255,0.13)" : "rgba(255,255,255,0.045)";
+      ctx.lineWidth = 1;
       ctx.moveTo(x, RULER_H);
       ctx.lineTo(x, height);
       ctx.stroke();
     }
   }
+
   const finalX = beatToX(endBeat, zoomX, scrollX);
   ctx.beginPath();
-  ctx.strokeStyle = "rgba(224, 181, 106, 0.55)";
+  ctx.strokeStyle = "rgba(224, 181, 106, 0.28)";
   ctx.moveTo(finalX, RULER_H);
   ctx.lineTo(finalX, height);
   ctx.stroke();
@@ -149,18 +152,22 @@ export function drawRoll(
   ctx.lineTo(KEY_W + 0.5, height);
   ctx.stroke();
 
+  // Beat numbers only. A ruler that counts quarter notes keeps its spacing when the meter changes.
   ctx.font = `12px "WenQuanYi Micro Hei", sans-serif`;
   ctx.textBaseline = "middle";
-  for (const measure of measures) {
-    const x = beatToX(measure.startBeat, zoomX, scrollX);
-    if (x < KEY_W - 4 || x > width) continue;
-    ctx.fillStyle = "#e7e1d6";
-    ctx.fillText(String(measure.index), x + 6, 16);
-    const prev = measures[measure.index - 2];
-    if (!prev || prev.beats !== measure.beats || prev.beatType !== measure.beatType) {
-      ctx.fillStyle = "#d7a15e";
-      ctx.fillText(`${measure.beats}/${measure.beatType}`, x + 22, 16);
-    }
+  const labelStep = zoomX >= 52 ? 1 : zoomX >= 26 ? 2 : 4;
+  const firstLabel = Math.floor(viewBeat0 / labelStep) * labelStep;
+  for (let beat = firstLabel; beat <= Math.min(viewBeat1, endBeat); beat += labelStep) {
+    if (beat < 0) continue;
+    const x = beatToX(beat, zoomX, scrollX);
+    if (x < KEY_W + 2 || x > width - 10) continue;
+    ctx.beginPath();
+    ctx.strokeStyle = "rgba(255,255,255,0.18)";
+    ctx.moveTo(x, RULER_H - 6);
+    ctx.lineTo(x, RULER_H);
+    ctx.stroke();
+    ctx.fillStyle = "#9c968a";
+    ctx.fillText(String(Math.round(beat) + 1), x + 4, 12);
   }
 
   const active = new Map<number, string>();
@@ -211,15 +218,11 @@ export function drawRoll(
     ctx.fillText(text, x + pad, y + 11);
   }
 
-  const where = locateBeat(Math.max(0, model.playhead), measures);
   ctx.fillStyle = "#9c968a";
   ctx.font = `11px "WenQuanYi Micro Hei", sans-serif`;
   ctx.textBaseline = "alphabetic";
-  const label =
-    model.locale === "zh"
-      ? `第 ${where.measure} 小节 · 拍 ${(where.beatInBar + 1).toFixed(2)}`
-      : `Bar ${where.measure} · beat ${(where.beatInBar + 1).toFixed(2)}`;
-  ctx.fillText(label, KEY_W + 8, height - 8);
+  const where = model.locale === "zh" ? "拍" : "Beat";
+  ctx.fillText(`${where} ${Math.max(0, model.playhead).toFixed(2)} / ${endBeat.toFixed(0)}`, KEY_W + 8, height - 8);
 }
 
 function roundRect(

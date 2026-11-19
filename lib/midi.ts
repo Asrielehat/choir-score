@@ -75,7 +75,9 @@ export function parseMidi(data: Uint8Array): RawScore {
       const on = stack?.shift();
       if (!on) return;
       const dur = (tickOff - on.tick) / ppq;
-      if (dur > 1 / 480) {
+      // Channel 10 (index 9) is percussion. A click or drum track there is not a sung
+      // or played note, and rendering it as piano is what makes playback sound like a metronome.
+      if (dur > 1 / 480 && channel !== 9) {
         notes.push({
           midi,
           startBeat: on.tick / ppq,
@@ -143,6 +145,7 @@ export function parseMidi(data: Uint8Array): RawScore {
     }
     for (const [key, stack] of pending) {
       const [channelText, midiText] = key.split(":");
+      if (Number(channelText) === 9) continue; // percussion
       for (const on of stack) {
         notes.push({
           midi: Number(midiText),

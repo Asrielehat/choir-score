@@ -1,7 +1,7 @@
 "use client";
 
-import { Editor } from "@/components/editor/Editor";
+import { Home } from "@/components/home/Home";
 
 export default function Page() {
-  return <Editor />;
+  return <Home />;
 }

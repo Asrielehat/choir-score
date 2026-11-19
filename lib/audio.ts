@@ -1,13 +1,22 @@
 import { isAudible } from "./tracks";
-import { beatToSeconds, projectEndBeat, scaleTempos, secondsToBeat } from "./timing";
+import { beatToSeconds, notesEndBeat, scaleTempos, secondsToBeat } from "./timing";
 import type { NoteEvent, ScoreProject, TempoPoint, Track } from "./types";
 
 type Listener = (beat: number, playing: boolean) => void;
 
+/** requestAnimationFrame is absent outside the browser (tests, server render). */
+function requestFrame(callback: () => void): number {
+  if (typeof requestAnimationFrame === "function") return requestAnimationFrame(callback);
+  return 0;
+}
+
+function cancelFrame(handle: number): void {
+  if (typeof cancelAnimationFrame === "function") cancelAnimationFrame(handle);
+}
+
 interface LiveVoice {
   oscs: OscillatorNode[];
   gains: GainNode[];
-  noise?: AudioBufferSourceNode;
 }
 
 /**
@@ -18,7 +27,6 @@ export class PlaybackEngine {
   private ctx: AudioContext | null = null;
   private master: GainNode | null = null;
   private trackGains = new Map<string, GainNode>();
-  private noise: AudioBuffer | null = null;
   private voices: LiveVoice[] = [];
   private tempos: TempoPoint[] = [{ beat: 0, bpm: 120 }];
   private originTime = 0;
@@ -53,14 +61,8 @@ export class PlaybackEngine {
       comp.release.value = 0.22;
       master.connect(comp);
       comp.connect(ctx.destination);
-      const noise = ctx.createBuffer(1, Math.floor(ctx.sampleRate * 0.04), ctx.sampleRate);
-      const data = noise.getChannelData(0);
-      for (let i = 0; i < data.length; i++) {
-        data[i] = (Math.random() * 2 - 1) * (1 - i / data.length) ** 3;
-      }
       this.ctx = ctx;
       this.master = master;
-      this.noise = noise;
     }
     if (this.ctx.state === "suspended") {
       await Promise.race([
@@ -106,7 +108,7 @@ export class PlaybackEngine {
     const startBeat = Math.max(0, fromBeat);
     const endBeat = onlyIds
       ? project.notes.reduce((max, note) => (onlyIds.has(note.id) ? Math.max(max, note.startBeat + note.durationBeats) : max), startBeat)
-      : projectEndBeat(project);
+      : Math.max(startBeat + 0.5, notesEndBeat(project));
     this.until = endBeat + 0.02;
     this.playhead = startBeat;
     this.originSec = beatToSeconds(startBeat, this.tempos);
@@ -117,7 +119,7 @@ export class PlaybackEngine {
       this.schedule(note);
     }
     this.emit();
-    cancelAnimationFrame(this.frame);
+    cancelFrame(this.frame);
     const tick = () => {
       if (!this.playing) return;
       const beat = this.currentBeat();
@@ -129,16 +131,16 @@ export class PlaybackEngine {
         return;
       }
       this.emit();
-      this.frame = requestAnimationFrame(tick);
+      this.frame = requestFrame(tick);
     };
-    this.frame = requestAnimationFrame(tick);
+    this.frame = requestFrame(tick);
   }
 
   pause() {
     if (!this.ctx) return;
     this.playhead = this.playing ? this.currentBeat() : this.playhead;
     this.playing = false;
-    cancelAnimationFrame(this.frame);
+    cancelFrame(this.frame);
     this.stopVoices();
     this.emit();
   }
@@ -146,7 +148,7 @@ export class PlaybackEngine {
   stop() {
     this.playing = false;
     this.playhead = 0;
-    cancelAnimationFrame(this.frame);
+    cancelFrame(this.frame);
     this.stopVoices();
     this.emit();
   }
@@ -218,23 +220,6 @@ export class PlaybackEngine {
       voice.oscs.push(osc);
       voice.gains.push(gain);
     }
-    if (this.noise) {
-      const src = ctx.createBufferSource();
-      src.buffer = this.noise;
-      const ng = ctx.createGain();
-      const hp = ctx.createBiquadFilter();
-      hp.type = "highpass";
-      hp.frequency.value = 1400;
-      ng.gain.setValueAtTime(0.05 * velocity, time);
-      ng.gain.exponentialRampToValueAtTime(0.0001, time + 0.04);
-      src.connect(hp);
-      hp.connect(ng);
-      ng.connect(dest);
-      src.start(time);
-      src.stop(time + 0.05);
-      voice.noise = src;
-      voice.gains.push(ng);
-    }
     this.voices.push(voice);
     const cleanup = () => {
       this.voices = this.voices.filter((item) => item !== voice);
@@ -266,11 +251,6 @@ export class PlaybackEngine {
         } catch {
           /* already stopped */
         }
-      }
-      try {
-        voice.noise?.stop(now + 0.01);
-      } catch {
-        /* already stopped */
       }
     }
     this.voices = [];

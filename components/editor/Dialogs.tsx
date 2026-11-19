@@ -192,9 +192,11 @@ export function HelpDialog({ open, onOpenChange }: { open: boolean; onOpenChange
       ? [
           ["空格", "播放 / 暂停"],
           ["Shift + 空格", "只播放选中的音符"],
+          ["双击空白处", "在「当前」声部放一个音块"],
+          ["右键点音块", "删除这个音块"],
           ["拖音符", "改开始时间和音高"],
           ["拖边缘", "改时值"],
-          ["框选 / Shift 点选", "多选"],
+          ["框选 / Shift 点选", "多选（静音轨不参与）"],
           ["方向键", "微调；Shift 为八度或整拍"],
           ["Delete", "删除"],
           ["Ctrl/⌘ Z / Y", "撤销 / 重做"],
@@ -205,9 +207,11 @@ export function HelpDialog({ open, onOpenChange }: { open: boolean; onOpenChange
       : [
           ["Space", "Play / pause"],
           ["Shift + Space", "Play only the selection"],
+          ["Double-click empty space", "Add a note on the active track"],
+          ["Right-click a note", "Delete that note"],
           ["Drag a note", "Move start time and pitch"],
           ["Drag an edge", "Change duration"],
-          ["Drag box / shift-click", "Multi-select"],
+          ["Drag box / shift-click", "Multi-select (muted tracks excluded)"],
           ["Arrows", "Nudge; Shift is an octave or a whole beat"],
           ["Delete", "Delete"],
           ["Ctrl/⌘ Z / Y", "Undo / redo"],
@@ -218,6 +222,13 @@ export function HelpDialog({ open, onOpenChange }: { open: boolean; onOpenChange
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent title={tr(locale, "怎么改谱", "How to edit")}>
+        <p className="mb-3 text-xs leading-5 text-[#9c968a]">
+          {tr(
+            locale,
+            "卷帘只按拍走，没有小节线：一首歌中途换拍也不会把音块挤歪。音块之间的空白就是休止。",
+            "The roll counts beats and draws no barlines, so a mid-song meter change never shifts a note. Gaps between notes are just rests.",
+          )}
+        </p>
         <dl className="grid grid-cols-[max-content_1fr] gap-x-4 gap-y-2 text-sm">
           {rows.map(([key, value]) => (
             <div key={key} className="contents">

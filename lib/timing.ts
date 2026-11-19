@@ -96,6 +96,21 @@ export function projectEndBeat(project: Pick<ScoreProject, "notes" | "measures">
   return end > 0 ? end : 4;
 }
 
+/**
+ * The last sounding beat. The roll and playback both use this so trailing empty bars
+ * from an import never stretch the timeline or leave silence at the end.
+ */
+export function notesEndBeat(project: Pick<ScoreProject, "notes">): number {
+  let end = 0;
+  for (const n of project.notes) end = Math.max(end, n.startBeat + n.durationBeats);
+  return end;
+}
+
+/** Timeline length for the roll: the last note plus a little room, never shorter than the view. */
+export function rollLength(project: Pick<ScoreProject, "notes">): number {
+  return Math.max(16, notesEndBeat(project) + 4);
+}
+
 /** Bars covering the score, extended if notes run past the last imported bar. */
 export function ensureMeasures(project: ScoreProject, endBeat = projectEndBeat(project)): MeasureSpan[] {
   const base = project.measures.length
