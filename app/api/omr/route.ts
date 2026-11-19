@@ -1,8 +1,8 @@
 import { spawn } from "node:child_process";
-import { accessSync, constants } from "node:fs";
+import { accessSync, constants, readdirSync } from "node:fs";
 import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
 import { NextResponse } from "next/server";
 import { readMetronomeBpm } from "@/lib/metronome";
 import { extractMxl } from "@/lib/mxl";
@@ -11,12 +11,10 @@ import { omrUnavailable } from "@/lib/omr";
 export const runtime = "nodejs";
 export const maxDuration = 600;
 
-const AUDIVERIS_CANDIDATES = ["/opt/audiveris/bin/Audiveris", "/usr/bin/audiveris"];
-const TESS_PREFIX =
-  process.env.TESSDATA_PREFIX ||
-  (exists("/opt/audiveris/tessdata/eng.traineddata")
-    ? "/opt/audiveris/tessdata/"
-    : "/usr/share/tesseract-ocr/5/tessdata/");
+const AUDIVERIS_CANDIDATES = ["/opt/audiveris/bin/Audiveris", "/usr/bin/audiveris", ...windowsEngines()];
+const TESS_PREFIX = process.env.TESSDATA_PREFIX || findTessdata();
+// Poppler (pdfinfo / pdftoppm) is installed outside PATH on Windows, so the child gets its folder prepended.
+const EXTRA_BIN = extraBinDirs();
 
 export function GET() {
   const engine = resolveEngine();
@@ -62,7 +60,7 @@ export async function POST(request: Request) {
       const preview = await previewJpeg(image);
       if (preview) previews.push({ label: isPdf ? `第 ${page} 页` : file.name, href: preview });
       const outdir = join(dir, `out-${page}`);
-      const languages = exists("/opt/audiveris/tessdata/chi_sim.traineddata") ? "chi_sim+eng" : "eng";
+      const languages = exists(join(TESS_PREFIX, "chi_sim.traineddata")) ? "chi_sim+eng" : "eng";
       const stderr = await run(
         engine,
         [
@@ -138,6 +136,50 @@ function exists(path: string): boolean {
   }
 }
 
+/** Audiveris installs as a jpackage launcher, not as a command on PATH. */
+function windowsEngines(): string[] {
+  if (process.platform !== "win32") return [];
+  const roots = [
+    process.env.LOCALAPPDATA && join(process.env.LOCALAPPDATA, "audiveris", "Audiveris"),
+    process.env.ProgramFiles && join(process.env.ProgramFiles, "Audiveris"),
+    process.env["ProgramFiles(x86)"] && join(process.env["ProgramFiles(x86)"], "Audiveris"),
+    "C:\\Program Files\\Audiveris",
+  ];
+  return roots.filter((root): root is string => Boolean(root)).map((root) => join(root, "Audiveris.exe"));
+}
+
+/** Text recognition data lives next to the Audiveris install on Windows and under /opt on Linux. */
+function findTessdata(): string {
+  const roots = [
+    process.env.LOCALAPPDATA && join(process.env.LOCALAPPDATA, "audiveris", "tessdata"),
+    "/opt/audiveris/tessdata",
+    "/usr/share/tesseract-ocr/5/tessdata",
+    "/usr/share/tesseract-ocr/4.00/tessdata",
+    "/usr/share/tessdata",
+  ].filter((root): root is string => Boolean(root));
+  const found = roots.find((root) => exists(join(root, "eng.traineddata")));
+  return withTrailingSlash(found ?? roots[0] ?? "");
+}
+
+function withTrailingSlash(path: string): string {
+  if (!path) return path;
+  return /[\\/]$/.test(path) ? path : `${path}${path.includes("\\") ? "\\" : "/"}`;
+}
+
+/** Portable poppler builds keep pdfinfo and pdftoppm in <poppler>/<version>/Library/bin. */
+function extraBinDirs(): string[] {
+  if (process.platform !== "win32" || !process.env.LOCALAPPDATA) return [];
+  const root = join(process.env.LOCALAPPDATA, "poppler");
+  try {
+    return readdirSync(root, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => join(root, entry.name, "Library", "bin"))
+      .filter((bin) => exists(join(bin, "pdftoppm.exe")));
+  } catch {
+    return [];
+  }
+}
+
 function resolveEngine(): string | null {
   if (process.env.OMR_COMMAND && process.env.OMR_COMMAND !== "audiveris") {
     return process.env.OMR_COMMAND;
@@ -207,7 +249,12 @@ function run(command: string, args: string[], timeoutMs: number): Promise<string
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, {
       stdio: ["ignore", "pipe", "pipe"],
-      env: { ...process.env, TESSDATA_PREFIX: TESS_PREFIX, JAVA_TOOL_OPTIONS: process.env.JAVA_TOOL_OPTIONS || "-Xmx2200m" },
+      env: {
+        ...process.env,
+        PATH: EXTRA_BIN.length ? [...EXTRA_BIN, process.env.PATH ?? ""].join(delimiter) : process.env.PATH,
+        TESSDATA_PREFIX: TESS_PREFIX,
+        JAVA_TOOL_OPTIONS: process.env.JAVA_TOOL_OPTIONS || "-Xmx2200m",
+      },
     });
     let stderr = "";
     let stdout = "";
@@ -218,7 +265,12 @@ function run(command: string, args: string[], timeoutMs: number): Promise<string
       stdout += chunk.toString("utf8");
     });
     const timer = setTimeout(() => {
-      child.kill("SIGKILL");
+      // Windows has no SIGKILL, and Audiveris is a launcher whose JVM runs as a grandchild.
+      if (process.platform === "win32" && child.pid) {
+        spawn("taskkill", ["/pid", String(child.pid), "/T", "/F"], { stdio: "ignore" });
+      } else {
+        child.kill("SIGKILL");
+      }
       reject(new Error("识别超时。请改传单页，或把 PDF 页码指到有谱的那一页。"));
     }, timeoutMs);
     child.on("error", (error) => {
